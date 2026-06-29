@@ -98,12 +98,11 @@ class PolymarketAPI:
     def discover_btc_updown_markets(self, limit: int = 500) -> list:
         """发现 BTC updown 市场
         
-        /markets?active=true 会过滤掉 updown 系列市场。
-        正确方法: 通过 events 接口按 series_slug 查询。
+        通过 events 接口按 series_slug 查询。
+        从每个 event 的 slug 中解析时间戳（如 btc-updown-15m-1782762300 → 1782762300）。
         """
         logger.info("发现 BTC updown 事件 (Gamma /events?series_slug)...")
 
-        # 尝试不同间隔的 series_slug
         all_markets = []
         for series in ["btc-up-or-down-15m", "btc-up-or-down-5m", "btc-up-or-down-1h"]:
             url = f"{self.gamma_url}/events"
@@ -117,17 +116,26 @@ class PolymarketAPI:
             data = _rate_limited_get(url, params=params)
             items = data if isinstance(data, list) else data.get("data", [])
             if items:
-                # 从事件中提取 markets
                 for evt in items:
-                    markets = evt.get("markets", [])
-                    for m in markets:
-                        m["_event_slug"] = evt.get("slug", "")
-                        m["_event_title"] = evt.get("title", "")
-                    all_markets.extend(markets)
-                logger.debug(f"series_slug={series}: {len(items)}个事件, {len(items[0].get('markets',[])) if items else 0}个市场/事件")
-                break  # 找到一种就停止
+                    event_slug = evt.get("slug", "")
+                    # 从 event slug 解析时间戳和间隔
+                    ts, interval = self._parse_updown_slug(event_slug)
+                    event_start = evt.get("eventStartTime", evt.get("start_time", ""))
+                    event_end = evt.get("endDate", evt.get("end_time", ""))
 
-        # 备用: 直接用 /markets?limit=500 过滤 slug 前缀
+                    for m in evt.get("markets", []):
+                        m["_event_slug"] = event_slug
+                        m["_event_title"] = evt.get("title", "")
+                        # 确保有 start/end 时间：优先市场级别，其次事件级别，最后 slug 解析
+                        if not m.get("start_time") and not m.get("startTime"):
+                            m["start_time"] = event_start or f"{ts}"
+                        if not m.get("end_time") and not m.get("endTime"):
+                            m["end_time"] = event_end or f"{ts + interval}"
+                    all_markets.extend(evt.get("markets", []))
+                logger.debug(f"series_slug={series}: {len(items)}个事件")
+                break
+
+        # 备用: /markets 过滤
         if not all_markets:
             logger.info("events 端点无结果，尝试 /markets 过滤...")
             url = f"{self.gamma_url}/markets"
@@ -135,38 +143,83 @@ class PolymarketAPI:
             markets = data if isinstance(data, list) else data.get("data", [])
             for m in markets:
                 slug = m.get("slug", "")
-                question = m.get("question", "")
-                if slug.startswith("btc-updown-") or question.startswith("Bitcoin Up or Down"):
+                if slug.startswith("btc-updown-"):
+                    ts, interval = self._parse_updown_slug(slug)
+                    m["_event_slug"] = slug
+                    if not m.get("start_time") and not m.get("startTime"):
+                        m["start_time"] = f"{ts}"
+                    if not m.get("end_time") and not m.get("endTime"):
+                        m["end_time"] = f"{ts + interval}"
                     all_markets.append(m)
 
-        all_markets.sort(key=lambda m: m.get("start_time", m.get("startTime", "")))
+        # 按 start_time 排序
+        all_markets.sort(key=lambda m: str(m.get("start_time", m.get("startTime", ""))))
         logger.info(f"找到 {len(all_markets)} 个 BTC updown 市场")
         if all_markets:
             first = all_markets[0]
-            logger.info(f"  首个市场: slug={first.get('slug','')} start={first.get('start_time',first.get('startTime',''))}")
+            logger.info(f"  首个: slug={first.get('_event_slug','')} "
+                        f"start={first.get('start_time',first.get('startTime',''))} "
+                        f"end={first.get('end_time',first.get('endTime',''))}")
         return all_markets
+
+    @staticmethod
+    def _parse_updown_slug(slug: str) -> tuple:
+        """从 btc-updown-15m-1782762300 解析 (timestamp, interval_seconds)"""
+        if not slug or not slug.startswith("btc-updown-"):
+            return (0, 900)
+        parts = slug.split("-")
+        # btc-updown-15m-1782762300 → parts[2]="15m", parts[3]="1782762300"
+        if len(parts) >= 4:
+            interval_str = parts[2]  # "15m", "5m", "1h"
+            try:
+                ts = int(parts[3])
+            except ValueError:
+                return (0, 900)
+            # 解析间隔
+            if interval_str.endswith("m"):
+                interval = int(interval_str[:-1]) * 60
+            elif interval_str.endswith("h"):
+                interval = int(interval_str[:-1]) * 3600
+            else:
+                interval = 900
+            return (ts, interval)
+        return (0, 900)
 
     def find_active_market(self, markets: list) -> dict:
         """在 updown 市场列表中找到当前活跃的那个
         
         活跃条件: start_time <= now < end_time
         如果找不到恰好活跃的，返回最近的即将开始的市场。
+        时间字段不可用时从 slug 解析。
         """
         now = datetime.now(timezone.utc)
-        logger.debug(f"当前UTC时间: {now.isoformat()}")
+        now_ts = int(now.timestamp())
+        logger.debug(f"当前UTC时间: {now.isoformat()} (ts={now_ts})")
 
         active = None
         upcoming = []
 
         for m in markets:
+            # 尝试从时间字段解析
             start = _parse_iso_time(m.get("start_time", m.get("startTime")))
             end = _parse_iso_time(m.get("end_time", m.get("endTime")))
+
+            # 如果时间字段无效，从 slug 解析
+            if not start or not end:
+                slug = m.get("_event_slug", m.get("slug", ""))
+                ts, interval = self._parse_updown_slug(slug)
+                if ts > 0:
+                    from datetime import datetime as dt
+                    start = dt.fromtimestamp(ts, tz=timezone.utc)
+                    end = dt.fromtimestamp(ts + interval, tz=timezone.utc)
+
             if not start or not end:
                 continue
 
+            slug = m.get("_event_slug", m.get("slug", ""))
             if start <= now < end:
                 active = m
-                logger.debug(f"找到活跃市场: {m.get('question','')}  ({start} ~ {end})")
+                logger.debug(f"✓ 活跃: {slug} ({start.strftime('%H:%M')}~{end.strftime('%H:%M')} UTC)")
                 break
             elif now < start:
                 upcoming.append((start, m))
@@ -176,9 +229,11 @@ class PolymarketAPI:
         if upcoming:
             upcoming.sort(key=lambda x: x[0])
             next_m = upcoming[0][1]
-            logger.debug(f"无活跃市场，使用即将开始的: {next_m.get('question','')}")
+            slug = next_m.get("_event_slug", "")
+            logger.info(f"无活跃市场，下一个将在 {upcoming[0][0].strftime('%H:%M')} 开始: {slug}")
             return next_m
-        logger.warning("无活跃也无即将开始的市场，返回第一个")
+
+        logger.warning("无活跃也无即将开始的市场")
         return None if not markets else markets[0]
 
     def extract_token_info(self, market: dict) -> dict:
