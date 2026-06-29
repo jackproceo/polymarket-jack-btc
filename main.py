@@ -2,6 +2,7 @@
 程序入口 - Polymarket BTC 套利模拟程序
 """
 import os
+import re
 import sys
 import time
 import signal
@@ -36,6 +37,7 @@ from src.web.app import create_app
 _running = True
 _current_price = 0.0
 _market_id = ""
+_market_condition_id = ""
 _btc_token_id = ""
 
 
@@ -55,85 +57,155 @@ def init_database(db):
 
 
 def find_btc_market(api):
-    """查找合适的BTC价格追踪市场"""
+    """查找合适的BTC价格追踪市场
+    返回: (slug, condition_id, yes_token_id)
+    """
     logger = get_logger()
     markets = api.search_btc_markets(limit=50)
 
     if not markets:
         logger.warning("未找到BTC相关市场，使用默认市场")
-        return "will-bitcoin-drop-below-50k-in-2025", ""
+        return "will-bitcoin-drop-below-50k-in-2025", "", ""
 
-    # 优先找包含价格追踪关键词的市场
-    priority_keywords = ["above", "below", "price", "will bitcoin", "btc above", "btc below"]
+    # 恶搞/无关市场排除词
+    exclude_keywords = [
+        "gta", "rihanna", "meme", "joke", "before gta",
+        "before grand theft", "video game", "album",
+    ]
+    # 价格追踪关键词（必须包含这些之一）
+    price_keywords = [
+        "above", "below", "over", "under", "hit", "reach",
+        "price of bitcoin", "btc price", "bitcoin price",
+        "will bitcoin", "will btc",
+    ]
+
+    candidates = []  # (score, slug, condition_id, yes_token_id, question)
     fallback = None
 
     for m in markets:
         question = m.get("question", "").lower()
-        slug = m.get("slug", m.get("condition_id", ""))
+        slug = m.get("slug", "")
+        condition_id = m.get("condition_id", m.get("id", ""))
         active = m.get("active", False)
+        closed = m.get("closed", False)
 
-        # 记录第一个活跃市场作为备选
-        if active and not fallback:
-            tokens = m.get("tokens", [])
-            yes_id = ""
-            for t in tokens:
-                if t.get("outcome", "").upper() == "YES":
-                    yes_id = t.get("token_id", "")
-                    break
-            fallback = (slug, yes_id, question)
+        # 跳过已关闭的市场
+        if closed:
+            continue
+        if not active:
+            continue
 
-        # 优先选择包含价格关键词的活跃市场
-        if active and any(kw in question for kw in priority_keywords):
-            tokens = m.get("tokens", [])
-            yes_id = ""
-            for t in tokens:
-                if t.get("outcome", "").upper() == "YES":
-                    yes_id = t.get("token_id", "")
-                    break
-            logger.info(f"找到BTC价格市场: {m.get('question', slug)[:60]}... | YES token: {yes_id[:16] if yes_id else 'N/A'}...")
-            return slug, yes_id
+        # 提取 YES token
+        tokens = m.get("tokens", [])
+        yes_id = ""
+        for t in tokens:
+            if t.get("outcome", "").upper() == "YES":
+                yes_id = t.get("token_id", "")
+
+        # 记录第一个活跃市场作为最终备选
+        if not fallback:
+            fallback = (slug, condition_id, yes_id, question)
+
+        # 排除恶搞市场
+        if any(kw in question for kw in exclude_keywords):
+            logger.debug(f"排除非价格市场: {question[:50]}...")
+            continue
+
+        # 必须包含价格追踪关键词
+        if not any(kw in question for kw in price_keywords):
+            continue
+
+        # 算分：包含价格数值的市场得分更高
+        score = 0
+        if "$" in question or re.search(r'\d{3,}', question):
+            score += 2
+        if "above" in question or "over" in question:
+            score += 1
+        if "below" in question or "under" in question:
+            score += 1
+        if yes_id:
+            score += 1
+
+        if score > 0:
+            candidates.append((score, slug, condition_id, yes_id, question))
+
+    # 按分数排序
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        score, slug, condition_id, yes_id, question = candidates[0]
+        logger.info(f"找到BTC价格市场(得分{score}): {question[:60]}...")
+        logger.info(f"  slug={slug}, condition_id={condition_id[:20]}..., yes_token={yes_id[:20]}...")
+        return slug, condition_id, yes_id
 
     if fallback:
-        logger.info(f"使用备选BTC市场: {fallback[2][:60]}...")
-        return fallback[0], fallback[1]
+        logger.warning(f"未找到价格追踪市场，使用备选: {fallback[3][:60]}...")
+        return fallback[0], fallback[1], fallback[2]
 
-    m = markets[0]
-    slug = m.get("slug", m.get("condition_id", ""))
-    logger.info(f"使用第一个可用市场: {m.get('question', slug)}")
-    return slug, ""
+    logger.warning("未找到任何活跃BTC市场")
+    return "", "", ""
 
 
-def fetch_market_data(db, api, market_slug):
-    global _current_price, _btc_token_id
+def fetch_market_data(db, api, market_slug, condition_id=None, btc_token_id=None):
+    global _current_price, _btc_token_id, _market_condition_id
     logger = get_logger()
 
     try:
-        market = api.get_market_by_slug(market_slug)
-        if market:
-            tokens = market.get("tokens", [])
-            for t in tokens:
-                if t.get("outcome", "").upper() == "YES":
-                    _btc_token_id = t.get("token_id", "")
-                    break
+        # 设置 token_id：优先用传入的，其次用全局缓存的
+        if btc_token_id:
+            _btc_token_id = btc_token_id
+        if condition_id:
+            _market_condition_id = condition_id
 
-        token_id = _btc_token_id or market_slug
+        # 如果还没有 token_id，尝试从市场详情获取
+        if not _btc_token_id and _market_condition_id:
+            market = api.get_market_by_id(_market_condition_id)
+            if market:
+                tokens = market.get("tokens", [])
+                for t in tokens:
+                    if t.get("outcome", "").upper() == "YES":
+                        _btc_token_id = t.get("token_id", "")
+
+        # 如果仍然没有，尝试通过 slug 获取
+        if not _btc_token_id and market_slug:
+            market = api.get_market_by_slug(market_slug)
+            if market:
+                # Gamma API 返回格式可能是列表或单个对象
+                if isinstance(market, list):
+                    market = market[0] if market else {}
+                tokens = market.get("tokens", [])
+                for t in tokens:
+                    if t.get("outcome", "").upper() == "YES":
+                        _btc_token_id = t.get("token_id", "")
+                if not _market_condition_id:
+                    _market_condition_id = market.get("condition_id", "")
+
+        token_id = _btc_token_id
+        if not token_id:
+            logger.warning("未找到 BTC YES token ID，跳过数据获取")
+            return
+
+        logger.debug(f"使用 token_id: {token_id[:20]}...")
+
+        # 获取K线历史数据（使用 condition_id 调用 Gamma API）
         interval = config.BTC_MARKET.get("interval", "15m")
         limit = config.BTC_MARKET.get("limit", 200)
-        kline_data = api.get_price_history(token_id, interval=interval, limit=limit)
+        history_id = _market_condition_id or token_id
+        kline_data = api.get_price_history(history_id, interval=interval, limit=limit)
 
         if kline_data:
             inserted = db.insert_market_data(market_slug, kline_data)
             if inserted > 0:
                 logger.info(f"新增 {inserted} 条K线数据")
-            if kline_data:
-                _current_price = kline_data[-1].get("close", 0.0)
+            _current_price = kline_data[-1].get("close", 0.0)
+            logger.debug(f"K线收盘价: {_current_price:.6f}")
         else:
             logger.warning("未获取到K线数据")
 
-        if _btc_token_id:
-            price_info = api.get_realtime_price(_btc_token_id)
-            _current_price = price_info.get("mid", _current_price)
-            logger.debug(f"实时价格: {_current_price:.6f}")
+        # 获取实时中间价（CLOB API）
+        price_info = api.get_realtime_price(_btc_token_id)
+        if price_info.get("mid", 0) > 0:
+            _current_price = price_info["mid"]
+            logger.debug(f"实时中间价: {_current_price:.6f}")
 
     except Exception as e:
         logger.error(f"获取市场数据失败: {e}")
@@ -153,7 +225,8 @@ def run_strategies(db, strategy_mgr, simulator, market_slug):
         logger.error(f"策略执行失败: {e}")
 
 
-def scheduler_loop(db, api, strategy_mgr, simulator, market_slug):
+def scheduler_loop(db, api, strategy_mgr, simulator, market_slug,
+                    condition_id=None, btc_token_id=None):
     global _running
     logger = get_logger()
     fetch_interval = config.BTC_MARKET.get("fetch_interval", 60)
@@ -163,7 +236,7 @@ def scheduler_loop(db, api, strategy_mgr, simulator, market_slug):
     while _running:
         now = time.time()
         if now - last_fetch >= fetch_interval:
-            fetch_market_data(db, api, market_slug)
+            fetch_market_data(db, api, market_slug, condition_id, btc_token_id)
             last_fetch = now
             run_strategies(db, strategy_mgr, simulator, market_slug)
         time.sleep(5)
@@ -195,9 +268,11 @@ def main():
     logger.info(f"数据库初始化完成: {config.DB_PATH}")
 
     api = PolymarketAPI()
-    market_slug, _ = find_btc_market(api)
+    market_slug, condition_id, yes_token_id = find_btc_market(api)
     _market_id = market_slug
-    logger.info(f"BTC市场: {market_slug}")
+    _market_condition_id = condition_id
+    _btc_token_id = yes_token_id
+    logger.info(f"BTC市场: slug={market_slug}, condition_id={condition_id[:20] if condition_id else 'N/A'}...")
 
     strategy_mgr = StrategyManager(db, api)
     strategy_mgr.sync_strategies_to_db()
@@ -208,11 +283,11 @@ def main():
 
     simulator = TradingSimulator(db, acc_mgr, config.ACCOUNT_DEFAULTS)
 
-    fetch_market_data(db, api, market_slug)
+    fetch_market_data(db, api, market_slug, condition_id, yes_token_id)
 
     scheduler_thread = threading.Thread(
         target=scheduler_loop,
-        args=(db, api, strategy_mgr, simulator, market_slug),
+        args=(db, api, strategy_mgr, simulator, market_slug, condition_id, yes_token_id),
         daemon=True,
         name="Scheduler"
     )

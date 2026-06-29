@@ -1,11 +1,12 @@
 """Polymarket REST API 封装
-直接调用 Gamma API、Data API、CLOB API
+调用 Gamma API（市场数据）和 CLOB API（实时价格）
 支持通过 .env 配置代理（国内环境需要）
 """
 import requests
 import time
 import json
 import os
+import re
 from pathlib import Path
 from src.utils.logger import get_logger
 
@@ -14,7 +15,6 @@ logger = get_logger()
 BASE_URLS = {
     "gamma": "https://gamma-api.polymarket.com",
     "clob": "https://clob.polymarket.com",
-    "data": "https://data-api.polymarket.com",
 }
 
 # 请求间隔（避免触发速率限制）
@@ -88,32 +88,23 @@ class PolymarketAPI:
     def __init__(self):
         self.gamma_url = BASE_URLS["gamma"]
         self.clob_url = BASE_URLS["clob"]
-        self.data_url = BASE_URLS["data"]
 
     def search_btc_markets(self, limit: int = 50) -> list:
         """搜索 BTC 相关市场（找价格追踪市场）"""
         logger.info("搜索BTC相关市场...")
         url = f"{self.gamma_url}/markets"
-        # 尝试多个搜索方式
         all_markets = []
-        # 方式1: 搜索 "bitcoin" 关键词
-        params = {"search": "bitcoin", "limit": limit, "active": "true"}
+
+        # 搜索 "bitcoin" 关键词
+        params = {"search": "bitcoin", "limit": limit, "active": "true", "closed": "false"}
         data = _rate_limited_get(url, params=params)
         if isinstance(data, list):
             all_markets.extend(data)
         elif isinstance(data, dict):
             all_markets.extend(data.get("data", []))
 
-        # 方式2: 搜索 "btc" 关键词
-        params = {"search": "btc", "limit": limit, "active": "true"}
-        data = _rate_limited_get(url, params=params)
-        if isinstance(data, list):
-            all_markets.extend(data)
-        elif isinstance(data, dict):
-            all_markets.extend(data.get("data", []))
-
-        # 方式3: 获取热门市场，手动过滤
-        params = {"limit": limit, "active": "true", "closed": "false"}
+        # 搜索 "btc" 关键词
+        params = {"search": "btc", "limit": limit, "active": "true", "closed": "false"}
         data = _rate_limited_get(url, params=params)
         if isinstance(data, list):
             all_markets.extend(data)
@@ -138,82 +129,75 @@ class PolymarketAPI:
         return _rate_limited_get(url)
 
     def get_market_by_slug(self, slug: str) -> dict:
-        """通过 slug 获取市场详情"""
-        url = f"{self.gamma_url}/markets/{slug}"
-        return _rate_limited_get(url)
+        """通过 slug 获取市场详情（使用 query param 方式）"""
+        url = f"{self.gamma_url}/markets"
+        return _rate_limited_get(url, params={"slug": slug})
 
     def get_price_history(self, market_id: str, interval: str = "15m",
-                          start_ts: int = None, end_ts: int = None,
                           limit: int = 200) -> list:
-        """获取市场价格历史（K线数据）"""
-        url = f"{self.data_url}/prices"
-        params = {"market_id": market_id, "interval": interval, "limit": limit}
-        if start_ts:
-            params["startTs"] = start_ts
-        if end_ts:
-            params["endTs"] = end_ts
+        """获取市场价格历史（K线数据）
+        
+        尝试多个 Gamma API 端点获取 timeseries 数据。
+        market_id 可以是 condition_id 或 slug。
+        """
+        if not market_id:
+            logger.warning("market_id 为空，跳过价格数据获取")
+            return []
 
-        data = _rate_limited_get(url, params=params)
-        if data:
-            return self._normalize_price_data(data)
+        # 端点1: Gamma timeseries
+        for endpoint in [
+            f"{self.gamma_url}/markets/{market_id}/prices_history",
+            f"{self.gamma_url}/markets/{market_id}/timeseries",
+        ]:
+            data = _rate_limited_get(endpoint, params={"interval": interval, "limit": limit, "fidelity": 60})
+            if data:
+                result = self._normalize_price_data(data)
+                if result:
+                    logger.debug(f"从 {endpoint} 获取到 {len(result)} 条K线")
+                    return result
 
-        logger.warning("Data API 失败，尝试通过 /trades 构建K线...")
-        return self._build_kline_from_trades(market_id, interval, limit)
+        # 端点2: 尝试从 market 详情获取 outcomePrices
+        detail = self.get_market_by_id(market_id)
+        if detail:
+            tokens = detail.get("tokens", detail.get("clobTokenIds", []))
+            prices_data = detail.get("outcomePrices", detail.get("prices", []))
+            if prices_data:
+                logger.debug(f"从市场详情获取到 {len(prices_data)} 条价格")
+                return self._normalize_price_data(prices_data)
+
+        logger.warning(f"无法获取K线数据: {market_id[:30]}...")
+        return []
 
     def _normalize_price_data(self, raw_data) -> list:
         """标准化价格数据格式"""
+        # 处理各种响应格式
         if isinstance(raw_data, dict):
-            raw_data = raw_data.get("data", raw_data.get("prices", []))
+            raw_data = raw_data.get("data", raw_data.get("prices", raw_data.get("history", raw_data)))
         if not isinstance(raw_data, list):
             return []
 
         result = []
         for item in raw_data:
-            result.append({
-                "timestamp": int(item.get("timestamp", item.get("ts", 0))),
-                "open": float(item.get("open", item.get("o", 0))),
-                "high": float(item.get("high", item.get("h", 0))),
-                "low": float(item.get("low", item.get("l", 0))),
-                "close": float(item.get("close", item.get("c", item.get("price", 0)))),
-                "volume": float(item.get("volume", item.get("v", 0))),
-            })
+            try:
+                ts = item.get("timestamp", item.get("ts", item.get("t", 0)))
+                result.append({
+                    "timestamp": int(ts),
+                    "open": float(item.get("open", item.get("o", 0))),
+                    "high": float(item.get("high", item.get("h", 0))),
+                    "low": float(item.get("low", item.get("l", 0))),
+                    "close": float(item.get("close", item.get("c", item.get("price", 0)))),
+                    "volume": float(item.get("volume", item.get("v", 0))),
+                })
+            except (ValueError, TypeError):
+                continue
         return result
-
-    def _build_kline_from_trades(self, token_id: str, interval: str = "15m", limit: int = 200) -> list:
-        """从交易记录构建K线数据（降级方案）"""
-        url = f"{self.clob_url}/trades"
-        params = {"token_id": token_id, "limit": limit * 4}
-        data = _rate_limited_get(url, params=params)
-        if not data:
-            return []
-
-        trades = data if isinstance(data, list) else data.get("data", [])
-        if not trades:
-            return []
-
-        interval_sec = self._interval_to_seconds(interval)
-        klines = {}
-        for t in trades:
-            ts = int(t.get("timestamp", 0))
-            bucket = (ts // interval_sec) * interval_sec
-            price = float(t.get("price", 0))
-            if bucket not in klines:
-                klines[bucket] = {"open": price, "high": price, "low": price, "close": price, "volume": 0}
-            k = klines[bucket]
-            k["high"] = max(k["high"], price)
-            k["low"] = min(k["low"], price)
-            k["close"] = price
-            k["volume"] += float(t.get("size", 1))
-
-        return [{"timestamp": ts, **v} for ts, v in sorted(klines.items())]
-
-    def _interval_to_seconds(self, interval: str) -> int:
-        """将间隔字符串转换为秒数"""
-        mapping = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "6h": 21600, "1d": 86400}
-        return mapping.get(interval, 900)
 
     def get_realtime_price(self, token_id: str) -> dict:
         """获取实时价格（买一/卖一/中间价）"""
+        if not token_id:
+            return {"bid": 0, "ask": 0, "mid": 0, "token_id": ""}
+
+        # CLOB API price endpoint
         url = f"{self.clob_url}/price"
         params = {"token_id": token_id}
         data = _rate_limited_get(url, params=params)
@@ -228,6 +212,8 @@ class PolymarketAPI:
 
     def get_midpoint(self, token_id: str) -> float:
         """获取中间价"""
+        if not token_id:
+            return 0.0
         url = f"{self.clob_url}/midpoint"
         params = {"token_id": token_id}
         data = _rate_limited_get(url, params=params)

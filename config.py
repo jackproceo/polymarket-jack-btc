@@ -15,7 +15,6 @@ DB_PATH = os.path.join(DATA_DIR, "trades.db")
 POLYMARKET = {
     "gamma_api": "https://gamma-api.polymarket.com",
     "clob_api": "https://clob.polymarket.com",
-    "data_api": "https://data-api.polymarket.com",
 }
 
 # BTC 市场配置（程序启动时会自动从 API 获取，这里为备用配置）
