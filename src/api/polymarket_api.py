@@ -116,51 +116,31 @@ class PolymarketAPI:
     def search_btc_updown_events(self, limit: int = 10) -> list:
         """搜索 btc-updown 15分钟事件（BTC涨跌预测）
         
+        由于 Gamma API 关键词搜索不可靠（会返回无关事件），
+        改为直接根据时间戳构造 slug 并逐个尝试获取事件详情。
         返回活跃的 btc-updown-15m 事件列表。
-        每个事件包含 markets 和 token 信息。
         """
         logger.info("搜索 BTC updown 事件...")
-        all_events = []
+        now_ts = int(time.time())
 
-        # 方式1: 用 title 搜索 btc-updown 事件
-        url = f"{self.gamma_url}/events"
-        for term in ["btc-updown", "btc updown", "btc-up", "btc up"]:
-            params = {"title": term, "limit": limit, "active": "true", "closed": "false"}
-            data = _rate_limited_get(url, params=params)
-            items = data if isinstance(data, list) else data.get("data", data.get("events", []))
-            if items:
-                all_events.extend(items)
-                break  # 找到了就停
+        # 找到最近和最远的15分钟对齐时间戳
+        # 尝试当前、上一个、下一个、前两个、后两个...
+        candidates = []
+        base = (now_ts // 900) * 900  # 15分钟对齐
+        for offset in [0, -900, 900, -1800, 1800, -2700, 2700]:
+            ts = base + offset
+            slug = f"btc-updown-15m-{ts}"
+            candidates.append(slug)
 
-        # 方式2: 如果事件API没找到，用 slug 搜索
-        if not all_events:
-            params = {"slug": "btc-updown", "limit": limit, "active": "true"}
-            data = _rate_limited_get(url, params=params)
-            items = data if isinstance(data, list) else data.get("data", data.get("events", []))
-            all_events.extend(items)
-
-        # 方式3: 直接尝试常见的 slug 模式
-        if not all_events:
-            for suffix in ["15m", "1h", "4h"]:
-                params = {"title": f"btc-updown-{suffix}", "limit": 3, "active": "true"}
-                data = _rate_limited_get(url, params=params)
-                items = data if isinstance(data, list) else data.get("data", data.get("events", []))
-                if items:
-                    all_events.extend(items)
-                    break
-
-        # 去重并过滤
-        seen = set()
         events = []
-        for e in all_events:
-            eid = e.get("id", e.get("slug", ""))
-            if eid and eid not in seen:
-                seen.add(eid)
-                if not e.get("closed") and e.get("active", True):
-                    events.append(e)
+        for slug in candidates:
+            detail = self.get_event_by_slug(slug)
+            if detail and detail.get("markets"):
+                # 检查是否已关闭
+                if not detail.get("closed"):
+                    events.append(detail)
+                    logger.debug(f"找到活跃事件: {slug}")
 
-        # 按创建时间排序，取最新的
-        events.sort(key=lambda x: x.get("createdAt", x.get("startDate", "")), reverse=True)
         logger.info(f"找到 {len(events)} 个 BTC updown 事件")
         return events
 
