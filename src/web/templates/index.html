@@ -78,7 +78,7 @@
         .main-layout {
             display: grid;
             grid-template-columns: 1fr 380px;
-            grid-template-rows: auto 1fr;
+            grid-template-rows: 1fr auto;
             gap: 12px;
             padding: 12px;
             height: calc(100vh - 52px);
@@ -104,9 +104,53 @@
         }
 
         /* 价格图表区域 */
-        .chart-card { grid-column: 1; grid-row: 1 / 3; }
+        .chart-card { grid-column: 1; grid-row: 1; overflow: hidden; }
         .chart-container { padding: 10px; height: calc(100% - 42px); }
         .chart-canvas { width: 100% !important; height: 100% !important; }
+
+        /* K线下方：交易历史 + 日志（tab 切换） */
+        .bottom-panel {
+            grid-column: 1;
+            grid-row: 2;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        .bottom-tabs {
+            display: flex;
+            gap: 2px;
+            margin-bottom: 8px;
+        }
+        .bottom-tab {
+            padding: 6px 16px;
+            border-radius: 4px 4px 0 0;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-bottom: none;
+            color: var(--text-secondary);
+            transition: 0.15s;
+        }
+        .bottom-tab.active {
+            background: var(--bg-secondary);
+            color: var(--blue);
+            border-color: var(--border);
+        }
+        .bottom-content {
+            flex: 1;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            max-height: 280px;
+        }
+        .bottom-content > .card {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
 
         /* 右侧面板 */
         .right-panel {
@@ -425,6 +469,51 @@
         </div>
     </div>
 
+    <!-- K线下方：交易历史 + 系统日志（Tab切换） -->
+    <div class="bottom-panel">
+        <div class="bottom-tabs">
+            <div class="bottom-tab active" onclick="switchBottomTab('trades')">📋 交易历史</div>
+            <div class="bottom-tab" onclick="switchBottomTab('logs')">📝 系统日志</div>
+        </div>
+        <div class="bottom-content">
+            <!-- 交易历史 -->
+            <div class="card" id="bottomTrades" style="display:flex;">
+                <div class="card-header">
+                    <select id="tradeFilter" onchange="loadTrades()" style="background:var(--bg-secondary); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:12px;">
+                        <option value="">全部</option>
+                        <option value="BUY">仅买入</option>
+                        <option value="SELL">仅卖出</option>
+                    </select>
+                </div>
+                <div style="overflow-y:auto; flex:1;">
+                    <table class="trades-table" id="tradesTable">
+                        <thead><tr>
+                            <th>时间</th><th>操作</th><th>价格</th><th>金额</th><th>盈亏</th>
+                        </tr></thead>
+                        <tbody id="tradesBody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <!-- 系统日志 -->
+            <div class="card" id="bottomLogs" style="display:none;">
+                <div class="card-header">
+                    <div style="display:flex; gap:6px;">
+                        <label style="font-size:11px; display:flex; align-items:center; gap:3px; cursor:pointer;">
+                            <input type="checkbox" checked onchange="filterLogs()"> INFO
+                        </label>
+                        <label style="font-size:11px; display:flex; align-items:center; gap:3px; cursor:pointer;">
+                            <input type="checkbox" checked onchange="filterLogs()"> WARN
+                        </label>
+                        <label style="font-size:11px; display:flex; align-items:center; gap:3px; cursor:pointer;">
+                            <input type="checkbox" checked onchange="filterLogs()"> ERROR
+                        </label>
+                    </div>
+                </div>
+                <div class="log-panel" id="logPanel" style="flex:1;"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- 右侧面板 -->
     <div class="right-panel">
 
@@ -450,7 +539,6 @@
                         <div class="stat-value" id="statPnl">--</div>
                     </div>
                 </div>
-                <!-- 账户参数显示 -->
                 <div style="margin-top:10px; font-size:11px; color:var(--text-secondary);" id="accountParams">
                     <span id="paramOrderAmt"></span>
                 </div>
@@ -464,45 +552,6 @@
                 <button class="btn btn-primary" onclick="showAddStrategy()">+ 绑定策略</button>
             </div>
             <div class="strategy-list" id="strategyList"></div>
-        </div>
-
-        <!-- 交易历史 -->
-        <div class="card" style="flex:1; min-height:0; display:flex; flex-direction:column;">
-            <div class="card-header">
-                <span>📋 交易历史</span>
-                <select id="tradeFilter" onchange="loadTrades()" style="background:var(--bg-secondary); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:12px;">
-                    <option value="">全部</option>
-                    <option value="BUY">仅买入</option>
-                    <option value="SELL">仅卖出</option>
-                </select>
-            </div>
-            <div style="overflow-y:auto; flex:1; max-height:250px;">
-                <table class="trades-table" id="tradesTable">
-                    <thead><tr>
-                        <th>时间</th><th>操作</th><th>价格</th><th>金额</th><th>盈亏</th>
-                    </tr></thead>
-                    <tbody id="tradesBody"></tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- 系统日志 -->
-        <div class="card">
-            <div class="card-header">
-                <span>📝 系统日志</span>
-                <div style="display:flex; gap:6px;">
-                    <label style="font-size:11px; display:flex; align-items:center; gap:3px; cursor:pointer;">
-                        <input type="checkbox" checked onchange="filterLogs()"> INFO
-                    </label>
-                    <label style="font-size:11px; display:flex; align-items:center; gap:3px; cursor:pointer;">
-                        <input type="checkbox" checked onchange="filterLogs()"> WARN
-                    </label>
-                    <label style="font-size:11px; display:flex; align-items:center; gap:3px; cursor:pointer;">
-                        <input type="checkbox" checked onchange="filterLogs()"> ERROR
-                    </label>
-                </div>
-            </div>
-            <div class="log-panel" id="logPanel"></div>
         </div>
 
     </div>
@@ -569,6 +618,14 @@ let currentAccountId = null;
 let priceChart = null;
 let pollInterval = null;
 let marketSlug = "";
+
+// ==================== 底部 Tab 切换 ====================
+function switchBottomTab(tab) {
+    document.querySelectorAll('.bottom-tab').forEach(t => t.classList.remove('active'));
+    document.querySelector(`.bottom-tab[onclick*="${tab}"]`)?.classList.add('active');
+    document.getElementById('bottomTrades').style.display = tab === 'trades' ? 'flex' : 'none';
+    document.getElementById('bottomLogs').style.display = tab === 'logs' ? 'flex' : 'none';
+}
 
 // ==================== 初始化 ====================
 document.addEventListener('DOMContentLoaded', () => {

@@ -140,7 +140,10 @@ class PolymarketAPI:
                     all_markets.append(m)
 
         all_markets.sort(key=lambda m: m.get("start_time", m.get("startTime", "")))
-        logger.info(f"找到 {len(all_markets)} 个 BTC updown 市场 (总尝试){len(all_markets)}个)")
+        logger.info(f"找到 {len(all_markets)} 个 BTC updown 市场")
+        if all_markets:
+            first = all_markets[0]
+            logger.info(f"  首个市场: slug={first.get('slug','')} start={first.get('start_time',first.get('startTime',''))}")
         return all_markets
 
     def find_active_market(self, markets: list) -> dict:
@@ -150,6 +153,7 @@ class PolymarketAPI:
         如果找不到恰好活跃的，返回最近的即将开始的市场。
         """
         now = datetime.now(timezone.utc)
+        logger.debug(f"当前UTC时间: {now.isoformat()}")
 
         active = None
         upcoming = []
@@ -162,7 +166,8 @@ class PolymarketAPI:
 
             if start <= now < end:
                 active = m
-                break  # 找到活跃的立即返回
+                logger.debug(f"找到活跃市场: {m.get('question','')}  ({start} ~ {end})")
+                break
             elif now < start:
                 upcoming.append((start, m))
 
@@ -170,7 +175,10 @@ class PolymarketAPI:
             return active
         if upcoming:
             upcoming.sort(key=lambda x: x[0])
-            return upcoming[0][1]
+            next_m = upcoming[0][1]
+            logger.debug(f"无活跃市场，使用即将开始的: {next_m.get('question','')}")
+            return next_m
+        logger.warning("无活跃也无即将开始的市场，返回第一个")
         return None if not markets else markets[0]
 
     def extract_token_info(self, market: dict) -> dict:

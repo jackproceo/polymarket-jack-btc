@@ -159,7 +159,7 @@ def scheduler_loop(db, api, strategy_mgr, simulator, market_info):
     global _running, _market_slug, _event_slug, _up_token_id, _down_token_id, _btc_tracker
     logger = get_logger()
     fetch_interval = config.BTC_MARKET.get("fetch_interval", 60)
-    rediscover_interval = 300
+    rediscover_interval = 120  # 2分钟重发现（15分钟窗口市场快速切换）
     last_fetch = 0
     last_discover = 0
     logger.info(f"调度器启动 | 数据获取间隔: {fetch_interval}s | 市场重发现间隔: {rediscover_interval}s")
