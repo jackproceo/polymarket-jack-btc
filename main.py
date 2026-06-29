@@ -35,6 +35,7 @@ from src.web.app import create_app
 _running = True
 _current_price = 0.0
 _market_slug = ""
+_event_slug = ""
 _up_token_id = ""
 _down_token_id = ""
 _btc_tracker = BTCPriceTracker()
@@ -155,10 +156,10 @@ def run_strategies(db, strategy_mgr, simulator, market_slug):
 
 
 def scheduler_loop(db, api, strategy_mgr, simulator, market_info):
-    global _running, _market_slug, _up_token_id, _down_token_id, _btc_tracker
+    global _running, _market_slug, _event_slug, _up_token_id, _down_token_id, _btc_tracker
     logger = get_logger()
     fetch_interval = config.BTC_MARKET.get("fetch_interval", 60)
-    rediscover_interval = 300  # 每5分钟重新发现市场（应对窗口切换）
+    rediscover_interval = 300
     last_fetch = 0
     last_discover = 0
     logger.info(f"调度器启动 | 数据获取间隔: {fetch_interval}s | 市场重发现间隔: {rediscover_interval}s")
@@ -166,12 +167,12 @@ def scheduler_loop(db, api, strategy_mgr, simulator, market_info):
     while _running:
         now = time.time()
 
-        # 定期重新发现市场 + 同步 BTC 窗口
         if now - last_discover >= rediscover_interval:
             new_info = find_btc_market(api)
             if new_info:
                 market_info = new_info
                 _market_slug = market_info["slug"]
+                _event_slug = market_info.get("event_slug", market_info["slug"])
                 _up_token_id = market_info["up_token_id"]
                 _down_token_id = market_info.get("down_token_id", "")
             last_discover = now
@@ -216,7 +217,8 @@ def main():
         logger.error("无法找到 BTC updown 市场，程序退出")
         return
 
-    _market_slug = market_info["slug"]
+    _market_slug = market_info["slug"]           # 市场 slug（DB 存储用）
+    _event_slug = market_info.get("event_slug", market_info["slug"])  # 事件 slug（URL 用）
     _up_token_id = market_info["up_token_id"]
     _down_token_id = market_info.get("down_token_id", "")
 
@@ -246,7 +248,7 @@ def main():
         simulator=simulator,
         polymarket_api=api,
         market_id=_market_slug,
-        market_slug=_market_slug,
+        market_slug=_event_slug,  # 前端展示用事件URL
     )
 
     # 启动 BTC 信息同步线程

@@ -96,37 +96,52 @@ class PolymarketAPI:
     # ==================== 市场发现 ====================
 
     def discover_btc_updown_markets(self, limit: int = 500) -> list:
-        """通过 Gamma /markets 接口发现 BTC updown 市场
+        """发现 BTC updown 市场
         
-        正确方法: GET /markets?limit=500 然后通过 slug 前缀过滤。
-        不能用 active=true —— 它会过滤掉 updown 系列市场。
-        
-        返回匹配的市场列表，按 start_time 排序。
+        /markets?active=true 会过滤掉 updown 系列市场。
+        正确方法: 通过 events 接口按 series_slug 查询。
         """
-        logger.info("发现 BTC updown 市场 (Gamma /markets)...")
-        url = f"{self.gamma_url}/markets"
-        data = _rate_limited_get(url, params={"limit": limit})
+        logger.info("发现 BTC updown 事件 (Gamma /events?series_slug)...")
 
-        markets = data if isinstance(data, list) else data.get("data", [])
-        if not markets:
-            logger.warning("/markets 返回空列表")
-            return []
+        # 尝试不同间隔的 series_slug
+        all_markets = []
+        for series in ["btc-up-or-down-15m", "btc-up-or-down-5m", "btc-up-or-down-1h"]:
+            url = f"{self.gamma_url}/events"
+            params = {
+                "series_slug": series,
+                "closed": "false",
+                "limit": limit,
+                "order": "endDate",
+                "ascending": "true",
+            }
+            data = _rate_limited_get(url, params=params)
+            items = data if isinstance(data, list) else data.get("data", [])
+            if items:
+                # 从事件中提取 markets
+                for evt in items:
+                    markets = evt.get("markets", [])
+                    for m in markets:
+                        m["_event_slug"] = evt.get("slug", "")
+                        m["_event_title"] = evt.get("title", "")
+                    all_markets.extend(markets)
+                logger.debug(f"series_slug={series}: {len(items)}个事件, {len(items[0].get('markets',[])) if items else 0}个市场/事件")
+                break  # 找到一种就停止
 
-        # 支持 15m、5m、1h 等不同间隔
-        updown = []
-        for m in markets:
-            slug = m.get("slug", "")
-            question = m.get("question", "")
-            # 匹配 slug: btc-updown-15m-*, btc-updown-5m-*, btc-updown-1h-*
-            if slug.startswith("btc-updown-"):
-                updown.append(m)
-            elif question.startswith("Bitcoin Up or Down -"):
-                updown.append(m)
+        # 备用: 直接用 /markets?limit=500 过滤 slug 前缀
+        if not all_markets:
+            logger.info("events 端点无结果，尝试 /markets 过滤...")
+            url = f"{self.gamma_url}/markets"
+            data = _rate_limited_get(url, params={"limit": limit})
+            markets = data if isinstance(data, list) else data.get("data", [])
+            for m in markets:
+                slug = m.get("slug", "")
+                question = m.get("question", "")
+                if slug.startswith("btc-updown-") or question.startswith("Bitcoin Up or Down"):
+                    all_markets.append(m)
 
-        # 按 start_time 排序
-        updown.sort(key=lambda m: m.get("start_time", m.get("startTime", "")))
-        logger.info(f"找到 {len(updown)} 个 BTC updown 市场 (总{len(markets)}个)")
-        return updown
+        all_markets.sort(key=lambda m: m.get("start_time", m.get("startTime", "")))
+        logger.info(f"找到 {len(all_markets)} 个 BTC updown 市场 (总尝试){len(all_markets)}个)")
+        return all_markets
 
     def find_active_market(self, markets: list) -> dict:
         """在 updown 市场列表中找到当前活跃的那个
@@ -162,7 +177,7 @@ class PolymarketAPI:
         """从市场数据中提取关键信息
         
         返回: {
-            "slug", "question", "condition_id",
+            "slug", "event_slug", "question", "condition_id",
             "up_token_id", "down_token_id",
             "start_time", "end_time"
         }
@@ -170,20 +185,13 @@ class PolymarketAPI:
         clob_ids = _parse_clob_ids(market)
         condition_id = market.get("conditionId", market.get("condition_id", ""))
 
-        # outcomes 格式可能是列表或 JSON 字符串
-        outcomes = market.get("outcomes", [])
-        if isinstance(outcomes, str):
-            try:
-                outcomes = json.loads(outcomes)
-            except (json.JSONDecodeError, TypeError):
-                outcomes = []
-
         up_token_id = clob_ids[0] if len(clob_ids) > 0 else ""
         down_token_id = clob_ids[1] if len(clob_ids) > 1 else ""
 
         return {
             "slug": market.get("slug", ""),
-            "question": market.get("question", ""),
+            "event_slug": market.get("_event_slug", market.get("slug", "")),
+            "question": market.get("question", market.get("title", market.get("_event_title", ""))),
             "condition_id": condition_id,
             "up_token_id": up_token_id,
             "down_token_id": down_token_id,
