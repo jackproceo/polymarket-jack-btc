@@ -270,50 +270,59 @@ class PolymarketAPI:
         s = str(raw_id).strip()
         if s.startswith("0x"):
             return s
-        # decimal 数字 → 0x hex
         if s.isdigit():
             return hex(int(s))
-        # 可能是无前缀的 hex
         if all(c in "0123456789abcdefABCDEF" for c in s):
             return "0x" + s
         return s
 
-    # ==================== CLOB 价格 ====================
+    # ==================== CLOB 价格（公开无需认证） ====================
+
+    def _get_order_book(self, token_id: str) -> dict:
+        """获取订单簿（一次调用拿 bid/ask/tick_size）"""
+        tid = self._to_clob_token_id(token_id)
+        if not tid:
+            return {}
+
+        # GET /book?token_id=xxx（公开端点）
+        url = f"{self.clob_url}/book"
+        return _rate_limited_get(url, params={"token_id": tid})
 
     def get_current_price(self, token_id: str) -> float:
-        """获取 token 当前中间价（CLOB /price）"""
-        tid = self._to_clob_token_id(token_id)
-        if not tid:
+        """获取中间价"""
+        book = self._get_order_book(token_id)
+        if not book:
             return 0.0
 
-        url = f"{self.clob_url}/price"
-        data = _rate_limited_get(url, params={"token_id": tid})
-        if data:
-            price = data.get("price")
-            if price is not None:
-                return float(price)
-            bid = float(data.get("bid", 0))
-            ask = float(data.get("ask", 0))
-            if bid > 0 and ask > 0:
-                return (bid + ask) / 2
-            return bid or ask
-        return 0.0
+        bids = book.get("bids", [])
+        asks = book.get("asks", [])
+        bid = float(bids[0]["price"]) if bids else 0
+        ask = float(asks[0]["price"]) if asks else 0
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2
+        return bid or ask
 
     def get_realtime_price(self, token_id: str) -> dict:
-        """获取实时价格详情（bid/ask/mid）"""
-        tid = self._to_clob_token_id(token_id)
-        if not tid:
+        """获取实时价格详情（bid/ask/mid + tick_size）"""
+        book = self._get_order_book(token_id)
+        if not book:
             return {"bid": 0, "ask": 0, "mid": 0, "token_id": ""}
 
-        url = f"{self.clob_url}/price"
-        data = _rate_limited_get(url, params={"token_id": tid})
-        if data:
-            bid = float(data.get("bid", 0))
-            ask = float(data.get("ask", 0))
-            price = data.get("price")
-            mid = float(price) if price else ((bid + ask) / 2 if bid and ask else 0)
-            return {"bid": bid, "ask": ask, "mid": mid, "token_id": tid}
-        return {"bid": 0, "ask": 0, "mid": 0, "token_id": tid}
+        bids = book.get("bids", [])
+        asks = book.get("asks", [])
+        bid = float(bids[0]["price"]) if bids else 0
+        ask = float(asks[0]["price"]) if asks else 0
+        mid = (bid + ask) / 2 if bid and ask else (bid or ask)
+
+        return {
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+            "token_id": self._to_clob_token_id(token_id),
+            "tick_size": book.get("tick_size", "0.01"),
+            "bid_depth": float(bids[0]["size"]) if bids else 0,
+            "ask_depth": float(asks[0]["size"]) if asks else 0,
+        }
 
     def get_midpoint(self, token_id: str) -> float:
         """获取中间价"""
