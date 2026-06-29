@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Jack BTC - 套利模拟监控</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #f5f7fa;
+            --bg-secondary: #ffffff;
+            --bg-tertiary: #f0f2f5;
+            --border: #e2e8f0;
+            --text-primary: #1a202c;
+            --text-secondary: #718096;
+            --green: #38a169;
+            --red: #e53e3e;
+            --yellow: #d69e2e;
+            --blue: #3182ce;
+            --shadow: 0 1px 3px rgba(0,0,0,0.08);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Roboto', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 13px;
+            overflow-x: hidden;
+        }
+
+        /* 顶部状态栏 */
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 20px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: var(--shadow);
+        }
+        .topbar-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--blue);
+        }
+        .topbar-price {
+            font-size: 24px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+        .topbar-price.up { color: var(--green); }
+        .topbar-price.down { color: var(--red); }
+        .status-dot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+        .status-dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); }
+        .status-dot.stopped { background: var(--red); }
+
+        .market-link {
+            font-size: 11px;
+            color: var(--blue);
+            text-decoration: none;
+            margin-left: 8px;
+        }
+        .market-link:hover { text-decoration: underline; }
+
+        /* 主布局 */
+        .main-layout {
+            display: grid;
+            grid-template-columns: 1fr 380px;
+            grid-template-rows: auto 1fr;
+            gap: 12px;
+            padding: 12px;
+            height: calc(100vh - 52px);
+        }
+
+        /* 卡片通用样式 */
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: var(--shadow);
+        }
+        .card-header {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--bg-tertiary);
+        }
+
+        /* 价格图表区域 */
+        .chart-card { grid-column: 1; grid-row: 1 / 3; }
+        .chart-container { padding: 10px; height: calc(100% - 42px); }
+        .chart-canvas { width: 100% !important; height: 100% !important; }
+
+        /* 右侧面板 */
+        .right-panel {
+            grid-column: 2;
+            grid-row: 1 / 3;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            overflow-y: auto;
+        }
+
+        /* 账户统计卡片 */
+        .stat-cards {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .stat-card {
+            padding: 12px;
+            border-radius: 6px;
+            background: var(--bg-tertiary);
+        }
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+        .stat-value {
+            font-size: 18px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+        .stat-value.green { color: var(--green); }
+        .stat-value.red { color: var(--red); }
+        .stat-value.yellow { color: var(--yellow); }
+
+        /* 策略列表 */
+        .strategy-list { max-height: 300px; overflow-y: auto; }
+        .strategy-item {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .strategy-item:last-child { border-bottom: none; }
+        .strategy-info { flex: 1; }
+        .strategy-name { font-weight: 600; font-size: 13px; }
+        .strategy-signal {
+            font-size: 11px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            margin-top: 3px;
+            display: inline-block;
+        }
+        .signal-BUY { background: rgba(56,161,105,0.15); color: var(--green); }
+        .signal-SELL { background: rgba(229,62,62,0.15); color: var(--red); }
+        .signal-HOLD { background: rgba(113,128,150,0.15); color: var(--text-secondary); }
+
+        /* 开关 */
+        .switch {
+            position: relative;
+            width: 40px; height: 22px;
+            cursor: pointer;
+        }
+        .switch input { display: none; }
+        .switch-slider {
+            position: absolute;
+            inset: 0;
+            background: #ccc;
+            border-radius: 11px;
+            transition: 0.2s;
+        }
+        .switch-slider::before {
+            content: '';
+            position: absolute;
+            width: 16px; height: 16px;
+            left: 3px; bottom: 3px;
+            background: white;
+            border-radius: 50%;
+            transition: 0.2s;
+        }
+        .switch input:checked + .switch-slider { background: var(--green); }
+        .switch input:checked + .switch-slider::before { transform: translateX(18px); }
+
+        /* 交易历史表格 */
+        .trades-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        .trades-table th {
+            padding: 8px 10px;
+            text-align: left;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+            background: var(--bg-tertiary);
+        }
+        .trades-table td {
+            padding: 7px 10px;
+            border-bottom: 1px solid var(--bg-tertiary);
+            font-variant-numeric: tabular-nums;
+        }
+        .trade-BUY { border-left: 3px solid var(--green); }
+        .trade-SELL { border-left: 3px solid var(--red); }
+        .action-badge {
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-weight: 600;
+            font-size: 11px;
+        }
+        .action-badge.BUY { background: rgba(56,161,105,0.15); color: var(--green); }
+        .action-badge.SELL { background: rgba(229,62,62,0.15); color: var(--red); }
+
+        /* 账户切换标签 */
+        .account-tabs {
+            display: flex;
+            gap: 4px;
+            padding: 8px 14px;
+            border-bottom: 1px solid var(--border);
+            overflow-x: auto;
+        }
+        .account-tab {
+            padding: 5px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            white-space: nowrap;
+            font-size: 12px;
+            border: 1px solid transparent;
+            transition: 0.15s;
+            background: var(--bg-tertiary);
+        }
+        .account-tab:hover { background: var(--border); }
+        .account-tab.active {
+            background: var(--blue);
+            color: white;
+            border-color: var(--blue);
+        }
+
+        /* 日志面板 */
+        .log-panel {
+            max-height: 200px;
+            overflow-y: auto;
+            padding: 8px 12px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 11px;
+            line-height: 1.6;
+            background: var(--bg-tertiary);
+        }
+        .log-line { padding: 1px 0; }
+        .log-INFO { color: var(--blue); }
+        .log-WARNING { color: var(--yellow); }
+        .log-ERROR { color: var(--red); }
+
+        /* 按钮 */
+        .btn {
+            padding: 5px 12px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            cursor: pointer;
+            font-size: 12px;
+            transition: 0.15s;
+        }
+        .btn:hover { border-color: var(--blue); color: var(--blue); }
+        .btn-primary {
+            background: var(--blue);
+            color: white;
+            border-color: var(--blue);
+            font-weight: 600;
+        }
+        .btn-primary:hover { opacity: 0.85; color: white; }
+        .btn-danger {
+            background: var(--red);
+            color: white;
+            border-color: var(--red);
+        }
+
+        /* 滚动条 */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+        /* 加载动画 */
+        .loading { opacity: 0.5; pointer-events: none; }
+
+        /* 参数表单 */
+        .param-form { padding: 10px 14px; }
+        .param-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+        }
+        .param-label { color: var(--text-secondary); font-size: 12px; }
+        .param-input {
+            width: 100px;
+            padding: 5px 8px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-primary);
+            font-size: 12px;
+            text-align: right;
+        }
+        .param-input:focus { border-color: var(--blue); outline: none; }
+
+        /* 模态框 */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.4);
+            z-index: 200;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal {
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            width: 420px;
+            max-width: 90vw;
+        }
+        .modal-header {
+            padding: 14px 18px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 700;
+            font-size: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .modal-body { padding: 18px; }
+        .modal-footer {
+            padding: 12px 18px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        .form-group {
+            margin-bottom: 14px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+            font-weight: 600;
+        }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 7px 10px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 13px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+        .form-group input:focus, .form-group select:focus {
+            border-color: var(--blue);
+            outline: none;
+        }
+
+        .hint { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+    </style>
+</head>
+<body>
+
+<!-- 顶部状态栏 -->
+<div class="topbar">
+    <div style="display:flex; align-items:center; gap:12px;">
+        <span class="topbar-title">⚡ Polymarket Jack BTC</span>
+        <span style="display:flex; align-items:center;">
+            <span class="status-dot running" id="statusDot"></span>
+            <span style="font-size:12px; color:var(--text-secondary);" id="statusText">运行中</span>
+        </span>
+    </div>
+    <div style="text-align:center;">
+        <div style="font-size:11px; color:var(--text-secondary);">BTC 预测价格</div>
+        <div class="topbar-price" id="topPrice">--</div>
+    </div>
+    <div style="display:flex; gap:16px; align-items:center; font-size:12px; color:var(--text-secondary);">
+        <span>
+            市场:
+            <a href="#" id="marketLink" target="_blank" class="market-link">--</a>
+        </span>
+        <span id="lastUpdate">最近更新: --</span>
+        <span style="background:var(--bg-tertiary); padding:3px 8px; border-radius:4px;">模拟盘</span>
+    </div>
+</div>
+
+<!-- 主布局 -->
+<div class="main-layout">
+
+    <!-- 左侧：价格图表 -->
+    <div class="card chart-card">
+        <div class="card-header">
+            <span>📈 BTC 15分钟K线</span>
+            <div style="display:flex; gap:12px; font-size:12px;">
+                <label style="display:flex; align-items:center; gap:4px; cursor:pointer;">
+                    <input type="checkbox" id="showMA20" checked> MA20
+                </label>
+                <label style="display:flex; align-items:center; gap:4px; cursor:pointer;">
+                    <input type="checkbox" id="showMA60" checked> MA60
+                </label>
+            </div>
+        </div>
+        <div class="chart-container">
+            <canvas id="priceChart" class="chart-canvas"></canvas>
+        </div>
+    </div>
+
+    <!-- 右侧面板 -->
+    <div class="right-panel">
+
+        <!-- 账户切换 + 统计 -->
+        <div class="card">
+            <div class="account-tabs" id="accountTabs"></div>
+            <div style="padding: 12px;">
+                <div class="stat-cards" id="statCards">
+                    <div class="stat-card">
+                        <div class="stat-label">可用余额 (USDC)</div>
+                        <div class="stat-value yellow" id="statBalance">--</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">持仓量</div>
+                        <div class="stat-value" id="statPosition">--</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">持仓均价</div>
+                        <div class="stat-value" id="statAvgCost">--</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">总盈亏</div>
+                        <div class="stat-value" id="statPnl">--</div>
+                    </div>
+                </div>
+                <!-- 账户参数显示 -->
+                <div style="margin-top:10px; font-size:11px; color:var(--text-secondary);" id="accountParams">
+                    <span id="paramOrderAmt"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 策略管理 -->
+        <div class="card" style="flex:1; min-height:0; display:flex; flex-direction:column;">
+            <div class="card-header">
+                <span>🤖 策略管理</span>
+                <button class="btn btn-primary" onclick="showAddStrategy()">+ 绑定策略</button>
+            </div>
+            <div class="strategy-list" id="strategyList"></div>
+        </div>
+
+        <!-- 交易历史 -->
+        <div class="card" style="flex:1; min-height:0; display:flex; flex-direction:column;">
+            <div class="card-header">
+                <span>📋 交易历史</span>
+                <select id="tradeFilter" onchange="loadTrades()" style="background:var(--bg-secondary); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:12px;">
+                    <option value="">全部</option>
+                    <option value="BUY">仅买入</option>
+                    <option value="SELL">仅卖出</option>
+                </select>
+            </div>
+            <div style="overflow-y:auto; flex:1; max-height:250px;">
+                <table class="trades-table" id="tradesTable">
+                    <thead><tr>
+                        <th>时间</th><th>操作</th><th>价格</th><th>金额</th><th>盈亏</th>
+                    </tr></thead>
+                    <tbody id="tradesBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 系统日志 -->
+        <div class="card">
+            <div class="card-header">
+                <span>📝 系统日志</span>
+                <div style="display:flex; gap:6px;">
+                    <label style="font-size:11px; display:flex; align-items:center; gap:3px; cursor:pointer;">
+                        <input type="checkbox" checked onchange="filterLogs()"> INFO
+                    </label>
+                    <label style="font-size:11px; display:flex; align-items:center; gap:3px; cursor:pointer;">
+                        <input type="checkbox" checked onchange="filterLogs()"> WARN
+                    </label>
+                    <label style="font-size:11px; display:flex; align-items:center; gap:3px; cursor:pointer;">
+                        <input type="checkbox" checked onchange="filterLogs()"> ERROR
+                    </label>
+                </div>
+            </div>
+            <div class="log-panel" id="logPanel"></div>
+        </div>
+
+    </div>
+</div>
+
+<!-- 创建账户弹窗 -->
+<div class="modal-overlay" id="createAccountModal">
+    <div class="modal">
+        <div class="modal-header">
+            <span>➕ 创建新账户</span>
+            <span style="cursor:pointer; font-size:18px; color:var(--text-secondary);" onclick="hideCreateAccount()">&times;</span>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label>账户名称</label>
+                <input type="text" id="newAccountName" placeholder="例如: BTC趋势账户" />
+            </div>
+            <div class="form-group">
+                <label>初始金额 (USDC)</label>
+                <input type="number" id="newAccountBalance" value="1000" min="10" step="10" />
+                <div class="hint">模拟账户初始资金</div>
+            </div>
+            <div class="form-group">
+                <label>每次下单金额 (USDC)</label>
+                <input type="number" id="newAccountOrderAmt" value="100" min="1" step="10" />
+                <div class="hint">每次策略信号触发时的下单金额</div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn" onclick="hideCreateAccount()">取消</button>
+            <button class="btn btn-primary" onclick="createAccount()">创建账户</button>
+        </div>
+    </div>
+</div>
+
+<!-- 绑定策略弹窗 -->
+<div class="modal-overlay" id="addStrategyModal">
+    <div class="modal">
+        <div class="modal-header">
+            <span>🤖 绑定策略</span>
+            <span style="cursor:pointer; font-size:18px; color:var(--text-secondary);" onclick="hideAddStrategy()">&times;</span>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label>选择策略</label>
+                <select id="newStrategySelect"></select>
+            </div>
+            <div class="form-group">
+                <label>分配资金 (USDC，可选)</label>
+                <input type="number" id="newStrategyFunds" placeholder="不填则使用账户全部资金" min="0" step="10" />
+                <div class="hint">留空表示使用账户全部可用资金</div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn" onclick="hideAddStrategy()">取消</button>
+            <button class="btn btn-primary" onclick="addStrategyBinding()">确认绑定</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// ==================== 全局状态 ====================
+let currentAccountId = null;
+let priceChart = null;
+let pollInterval = null;
+let marketSlug = "";
+
+// ==================== 初始化 ====================
+document.addEventListener('DOMContentLoaded', () => {
+    loadAccounts();
+    initChart();
+    startPolling();
+});
+
+function startPolling() {
+    pollInterval = setInterval(() => {
+        loadStatus();
+        if (currentAccountId) {
+            loadAccountDetail(currentAccountId);
+            loadTrades();
+        }
+        loadStrategies();
+        loadLogs();
+    }, 5000);
+    // 立即加载一次
+    loadStatus();
+    loadStrategies();
+    loadLogs();
+}
+
+// ==================== 账户管理 ====================
+async function loadAccounts() {
+    const resp = await fetch('/api/accounts');
+    const accounts = await resp.json();
+    const tabs = document.getElementById('accountTabs');
+    tabs.innerHTML = '';
+
+    // 添加"新建账户"按钮
+    const addBtn = document.createElement('div');
+    addBtn.className = 'account-tab';
+    addBtn.textContent = '+ 新建';
+    addBtn.style.background = 'var(--green)';
+    addBtn.style.color = 'white';
+    addBtn.style.borderColor = 'var(--green)';
+    addBtn.onclick = () => showCreateAccount();
+    tabs.appendChild(addBtn);
+
+    if (accounts.length === 0) {
+        return;
+    }
+
+    accounts.forEach(acc => {
+        const tab = document.createElement('div');
+        tab.className = 'account-tab' + (acc.id === currentAccountId ? ' active' : '');
+        tab.textContent = acc.name;
+        tab.onclick = () => selectAccount(acc.id);
+        tabs.appendChild(tab);
+    });
+
+    if (!currentAccountId && accounts.length > 0) {
+        selectAccount(accounts[0].id);
+    }
+}
+
+function showCreateAccount() {
+    document.getElementById('createAccountModal').classList.add('show');
+}
+
+function hideCreateAccount() {
+    document.getElementById('createAccountModal').classList.remove('show');
+}
+
+async function createAccount() {
+    const name = document.getElementById('newAccountName').value.trim();
+    const balance = parseFloat(document.getElementById('newAccountBalance').value);
+    const orderAmt = parseFloat(document.getElementById('newAccountOrderAmt').value);
+
+    if (!name) {
+        alert('请输入账户名称');
+        return;
+    }
+    if (!balance || balance <= 0) {
+        alert('请输入有效的初始金额');
+        return;
+    }
+    if (!orderAmt || orderAmt <= 0) {
+        alert('请输入有效的下单金额');
+        return;
+    }
+
+    const resp = await fetch('/api/accounts', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            name: name,
+            initial_balance: balance,
+            order_amount: orderAmt,
+        })
+    });
+    const result = await resp.json();
+    if (result.error) {
+        alert('创建失败: ' + result.error);
+        return;
+    }
+
+    hideCreateAccount();
+    // 清空表单
+    document.getElementById('newAccountName').value = '';
+    document.getElementById('newAccountBalance').value = 1000;
+    document.getElementById('newAccountOrderAmt').value = 100;
+    loadAccounts();
+}
+
+async function selectAccount(accountId) {
+    currentAccountId = accountId;
+    // 更新标签样式
+    document.querySelectorAll('.account-tab').forEach(t => t.classList.remove('active'));
+    event.target.classList.add('active');
+    loadAccountDetail(accountId);
+    loadTrades();
+    loadStrategies();
+}
+
+async function loadAccountDetail(accountId) {
+    const resp = await fetch(`/api/accounts/${accountId}`);
+    const acc = await resp.json();
+
+    const pnl = acc.total_pnl || 0;
+    const pnlColor = pnl >= 0 ? 'green' : 'red';
+
+    document.getElementById('statBalance').textContent = (acc.balance || 0).toFixed(2);
+    document.getElementById('statBalance').className = 'stat-value yellow';
+    document.getElementById('statPosition').textContent = (acc.position || 0).toFixed(4);
+    document.getElementById('statAvgCost').textContent = (acc.avg_cost || 0).toFixed(6);
+    document.getElementById('statPnl').textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
+    document.getElementById('statPnl').className = 'stat-value ' + pnlColor;
+
+    // 显示账户参数
+    document.getElementById('paramOrderAmt').textContent =
+        '下单金额: ' + (acc.order_amount || 100) + ' USDC';
+}
+
+// ==================== 价格图表 ====================
+function initChart() {
+    const ctx = document.getElementById('priceChart').getContext('2d');
+    priceChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            datasets: [
+                {
+                    label: '收盘价',
+                    data: [],
+                    borderColor: '#3182ce',
+                    backgroundColor: 'rgba(49,130,206,0.05)',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.1,
+                    yAxisID: 'y',
+                },
+                {
+                    label: 'MA20',
+                    data: [],
+                    borderColor: '#d69e2e',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0.1,
+                    yAxisID: 'y',
+                },
+                {
+                    label: 'MA60',
+                    data: [],
+                    borderColor: '#3182ce',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    tension: 0.1,
+                    yAxisID: 'y',
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    mode: 'index',
+                    intersect: false,
+                    backgroundColor: '#ffffff',
+                    borderColor: '#e2e8f0',
+                    borderWidth: 1,
+                    titleColor: '#1a202c',
+                    bodyColor: '#4a5568',
+                }
+            },
+            scales: {
+                x: {
+                    type: 'time',
+                    time: { unit: 'hour', displayFormats: { hour: 'MM-dd HH:mm' } },
+                    grid: { color: 'rgba(0,0,0,0.05)' },
+                    ticks: { color: '#718096', font: {size: 10} }
+                },
+                y: {
+                    grid: { color: 'rgba(0,0,0,0.05)' },
+                    ticks: { color: '#718096', font: {size: 10} }
+                }
+            }
+        }
+    });
+    loadPrices();
+}
+
+async function loadPrices() {
+    const resp = await fetch('/api/prices?limit=200');
+    const data = await resp.json();
+    if (!data || data.length === 0) return;
+
+    const prices = data.map(d => ({
+        x: new Date(d.timestamp * 1000),
+        y: d.close,
+        open: d.open, high: d.high, low: d.low, close: d.close,
+    }));
+
+    // 计算MA
+    const closes = data.map(d => d.close);
+    const ma20 = calcMA(closes, 20);
+    const ma60 = calcMA(closes, 60);
+
+    priceChart.data.datasets[0].data = prices;
+    priceChart.data.datasets[1].data = prices.map((p, i) => ma20[i] ? {x: p.x, y: ma20[i]} : null);
+    priceChart.data.datasets[2].data = prices.map((p, i) => ma60[i] ? {x: p.x, y: ma60[i]} : null);
+
+    // 控制显示
+    priceChart.data.datasets[1].hidden = !document.getElementById('showMA20').checked;
+    priceChart.data.datasets[2].hidden = !document.getElementById('showMA60').checked;
+
+    priceChart.update('none');
+
+    // 更新顶部价格
+    const lastPrice = closes[closes.length - 1];
+    const prevPrice = closes[closes.length - 2] || lastPrice;
+    const el = document.getElementById('topPrice');
+    el.textContent = (lastPrice * 100).toFixed(2) + '%';
+    el.className = 'topbar-price ' + (lastPrice >= prevPrice ? 'up' : 'down');
+}
+
+function calcMA(data, period) {
+    const result = [];
+    for (let i = 0; i < data.length; i++) {
+        if (i < period - 1) { result.push(null); continue; }
+        let sum = 0;
+        for (let j = i - period + 1; j <= i; j++) sum += data[j];
+        result.push(sum / period);
+    }
+    return result;
+}
+
+// ==================== 策略管理 ====================
+async function loadStrategies() {
+    if (!currentAccountId) return;
+    const resp = await fetch(`/api/account_strategy/status?account_id=${currentAccountId}`);
+    const strategies = await resp.json();
+
+    const list = document.getElementById('strategyList');
+    list.innerHTML = '';
+
+    if (strategies.length === 0) {
+        list.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-secondary);">暂无绑定策略，点击"绑定策略"添加</div>';
+        return;
+    }
+
+    strategies.forEach(s => {
+        const item = document.createElement('div');
+        item.className = 'strategy-item';
+        item.innerHTML = `
+            <div class="strategy-info">
+                <div class="strategy-name">${s.strategy_display_name || s.strategy_name}</div>
+                <div class="strategy-signal signal-${s.last_signal}">${s.last_signal}</div>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:11px; color:var(--text-secondary);">${s.trades_count || 0}笔</span>
+                <label class="switch">
+                    <input type="checkbox" ${s.enabled ? 'checked' : ''} onchange="toggleStrategy(${s.binding_id}, this.checked)">
+                    <span class="switch-slider"></span>
+                </label>
+            </div>
+        `;
+        list.appendChild(item);
+    });
+}
+
+async function toggleStrategy(bindId, enabled) {
+    await fetch(`/api/account_strategy/${bindId}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: enabled ? 1 : 0})
+    });
+}
+
+async function showAddStrategy() {
+    if (!currentAccountId) {
+        alert('请先选择一个账户');
+        return;
+    }
+    // 加载可用策略
+    const resp = await fetch('/api/strategies');
+    const strategies = await resp.json();
+    const select = document.getElementById('newStrategySelect');
+    select.innerHTML = '';
+    strategies.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = s.display_name;
+        select.appendChild(opt);
+    });
+    document.getElementById('addStrategyModal').classList.add('show');
+}
+
+function hideAddStrategy() {
+    document.getElementById('addStrategyModal').classList.remove('show');
+}
+
+async function addStrategyBinding() {
+    const strategyId = parseInt(document.getElementById('newStrategySelect').value);
+    const funds = document.getElementById('newStrategyFunds').value;
+    await fetch('/api/account_strategy', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            account_id: currentAccountId,
+            strategy_id: strategyId,
+            allocated_funds: funds ? parseFloat(funds) : null,
+        })
+    });
+    hideAddStrategy();
+    document.getElementById('newStrategyFunds').value = '';
+    loadStrategies();
+}
+
+// ==================== 交易历史 ====================
+async function loadTrades() {
+    if (!currentAccountId) return;
+    const filter = document.getElementById('tradeFilter').value;
+    let url = `/api/trades?account_id=${currentAccountId}&limit=50`;
+    const resp = await fetch(url);
+    let trades = await resp.json();
+
+    if (filter) {
+        trades = trades.filter(t => t.action === filter);
+    }
+
+    const tbody = document.getElementById('tradesBody');
+    tbody.innerHTML = '';
+
+    trades.forEach(t => {
+        const tr = document.createElement('tr');
+        tr.className = 'trade-' + t.action;
+        const ts = new Date(t.timestamp * 1000).toLocaleString('zh-CN', {hour12:false});
+        tr.innerHTML = `
+            <td>${ts}</td>
+            <td><span class="action-badge ${t.action}">${t.action}</span></td>
+            <td>${(t.price * 100).toFixed(2)}%</td>
+            <td>${t.value.toFixed(2)}</td>
+            <td style="color:${t.pnl >= 0 ? 'var(--green)' : 'var(--red)'}">${(t.pnl || 0) >= 0 ? '+' : ''}${(t.pnl || 0).toFixed(4)}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+// ==================== 日志 ====================
+async function loadLogs() {
+    const resp = await fetch('/api/logs?limit=100');
+    const logs = await resp.json();
+    const panel = document.getElementById('logPanel');
+    panel.innerHTML = '';
+    logs.forEach(line => {
+        const div = document.createElement('div');
+        div.className = 'log-line';
+        div.innerHTML = line
+            .replace(/\[INFO\]/g, '<span class="log-INFO">[INFO]</span>')
+            .replace(/\[WARNING\]/g, '<span class="log-WARNING">[WARNING]</span>')
+            .replace(/\[ERROR\]/g, '<span class="log-ERROR">[ERROR]</span>');
+        panel.appendChild(div);
+    });
+    panel.scrollTop = panel.scrollHeight;
+}
+
+// ==================== 状态 ====================
+async function loadStatus() {
+    const resp = await fetch('/api/status');
+    const data = await resp.json();
+    document.getElementById('lastUpdate').textContent =
+        '最近更新: ' + new Date(data.timestamp * 1000).toLocaleTimeString('zh-CN', {hour12:false});
+
+    // 更新市场链接
+    if (data.market_slug && data.market_slug !== marketSlug) {
+        marketSlug = data.market_slug;
+        const link = document.getElementById('marketLink');
+        link.href = 'https://polymarket.com/market/' + marketSlug;
+        link.textContent = marketSlug;
+    }
+
+    // 如果图表数据需要更新
+    loadPrices();
+}
+
+// 监听MA显示开关
+document.getElementById('showMA20').addEventListener('change', () => priceChart && priceChart.update());
+document.getElementById('showMA60').addEventListener('change', () => priceChart && priceChart.update());
+</script>
+
+</body>
+</html>
