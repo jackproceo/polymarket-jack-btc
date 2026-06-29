@@ -961,7 +961,7 @@ async function loadStatus() {
     if (data.market_slug && data.market_slug !== marketSlug) {
         marketSlug = data.market_slug;
         const link = document.getElementById('marketLink');
-        link.href = 'https://polymarket.com/market/' + marketSlug;
+        link.href = 'https://polymarket.com/zh/event/' + marketSlug;
         link.textContent = marketSlug;
     }
 

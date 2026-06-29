@@ -89,39 +89,63 @@ class PolymarketAPI:
         self.gamma_url = BASE_URLS["gamma"]
         self.clob_url = BASE_URLS["clob"]
 
-    def search_btc_markets(self, limit: int = 50) -> list:
-        """搜索 BTC 相关市场（找价格追踪市场）"""
-        logger.info("搜索BTC相关市场...")
-        url = f"{self.gamma_url}/markets"
-        all_markets = []
+    # ==================== 事件/市场搜索 ====================
 
-        # 搜索 "bitcoin" 关键词
-        params = {"search": "bitcoin", "limit": limit, "active": "true", "closed": "false"}
-        data = _rate_limited_get(url, params=params)
-        if isinstance(data, list):
-            all_markets.extend(data)
-        elif isinstance(data, dict):
-            all_markets.extend(data.get("data", []))
+    def search_btc_updown_events(self, limit: int = 10) -> list:
+        """搜索 btc-updown 15分钟事件（BTC涨跌预测）
+        
+        返回活跃的 btc-updown-15m 事件列表。
+        每个事件包含 markets 和 token 信息。
+        """
+        logger.info("搜索 BTC updown 事件...")
+        all_events = []
 
-        # 搜索 "btc" 关键词
-        params = {"search": "btc", "limit": limit, "active": "true", "closed": "false"}
-        data = _rate_limited_get(url, params=params)
-        if isinstance(data, list):
-            all_markets.extend(data)
-        elif isinstance(data, dict):
-            all_markets.extend(data.get("data", []))
+        # 方式1: 用 title 搜索 btc-updown 事件
+        url = f"{self.gamma_url}/events"
+        for term in ["btc-updown", "btc updown", "btc-up", "btc up"]:
+            params = {"title": term, "limit": limit, "active": "true", "closed": "false"}
+            data = _rate_limited_get(url, params=params)
+            items = data if isinstance(data, list) else data.get("data", data.get("events", []))
+            if items:
+                all_events.extend(items)
+                break  # 找到了就停
 
-        # 去重
+        # 方式2: 如果事件API没找到，用 slug 搜索
+        if not all_events:
+            params = {"slug": "btc-updown", "limit": limit, "active": "true"}
+            data = _rate_limited_get(url, params=params)
+            items = data if isinstance(data, list) else data.get("data", data.get("events", []))
+            all_events.extend(items)
+
+        # 方式3: 直接尝试常见的 slug 模式
+        if not all_events:
+            for suffix in ["15m", "1h", "4h"]:
+                params = {"title": f"btc-updown-{suffix}", "limit": 3, "active": "true"}
+                data = _rate_limited_get(url, params=params)
+                items = data if isinstance(data, list) else data.get("data", data.get("events", []))
+                if items:
+                    all_events.extend(items)
+                    break
+
+        # 去重并过滤
         seen = set()
-        unique_markets = []
-        for m in all_markets:
-            mid = m.get("condition_id", m.get("id", ""))
-            if mid and mid not in seen:
-                seen.add(mid)
-                unique_markets.append(m)
+        events = []
+        for e in all_events:
+            eid = e.get("id", e.get("slug", ""))
+            if eid and eid not in seen:
+                seen.add(eid)
+                if not e.get("closed") and e.get("active", True):
+                    events.append(e)
 
-        logger.info(f"找到 {len(unique_markets)} 个BTC相关市场")
-        return unique_markets
+        # 按创建时间排序，取最新的
+        events.sort(key=lambda x: x.get("createdAt", x.get("startDate", "")), reverse=True)
+        logger.info(f"找到 {len(events)} 个 BTC updown 事件")
+        return events
+
+    def get_event_by_slug(self, event_slug: str) -> dict:
+        """通过 slug 获取事件详情（含 markets 和 tokens）"""
+        url = f"{self.gamma_url}/events/{event_slug}"
+        return _rate_limited_get(url)
 
     def get_market_by_id(self, condition_id: str) -> dict:
         """通过 condition_id 获取市场详情"""

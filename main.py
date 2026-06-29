@@ -4,6 +4,7 @@
 import os
 import re
 import sys
+import json
 import time
 import signal
 import logging
@@ -57,91 +58,105 @@ def init_database(db):
 
 
 def find_btc_market(api):
-    """查找合适的BTC价格追踪市场
-    返回: (slug, condition_id, yes_token_id)
+    """查找 btc-updown 事件中 BTC 上涨市场
+    返回: (event_slug, market_condition_id, up_token_id)
+    
+    Polymarket 上的 BTC 交易市场是 btc-updown-15m 事件，
+    URL 格式: https://polymarket.com/zh/event/btc-updown-15m-{timestamp}
     """
     logger = get_logger()
-    markets = api.search_btc_markets(limit=50)
 
-    if not markets:
-        logger.warning("未找到BTC相关市场，使用默认市场")
-        return "will-bitcoin-drop-below-50k-in-2025", "", ""
+    # 直接搜索 btc-updown 事件
+    events = api.search_btc_updown_events(limit=10)
+    if not events:
+        # 回退：尝试直接构造常见的 slug
+        logger.warning("API 搜索未找到 btc-updown 事件，尝试直接获取...")
+        now_ts = int(time.time())
+        # btc-updown 事件通常是 15 分钟对齐的
+        aligned_ts = (now_ts // 900) * 900 + 900  # 下一个15分钟对齐点
+        for offset in [0, -900, -1800, 900, 1800]:  # 尝试附近几个时间点
+            test_slug = f"btc-updown-15m-{aligned_ts + offset}"
+            detail = api.get_event_by_slug(test_slug)
+            if detail and detail.get("markets"):
+                events = [detail]
+                break
 
-    # 恶搞/无关市场排除词
-    exclude_keywords = [
-        "gta", "rihanna", "meme", "joke", "before gta",
-        "before grand theft", "video game", "album",
-    ]
-    # 价格追踪关键词（必须包含这些之一）
-    price_keywords = [
-        "above", "below", "over", "under", "hit", "reach",
-        "price of bitcoin", "btc price", "bitcoin price",
-        "will bitcoin", "will btc",
-    ]
+    if not events:
+        logger.error("未找到任何 btc-updown 事件")
+        return "", "", ""
 
-    candidates = []  # (score, slug, condition_id, yes_token_id, question)
-    fallback = None
+    # 遍历事件，找到活跃的且有 UP/YES 市场的
+    for evt in events:
+        event_slug = evt.get("slug", "")
+        markets = evt.get("markets", [])
 
-    for m in markets:
-        question = m.get("question", "").lower()
-        slug = m.get("slug", "")
-        condition_id = m.get("condition_id", m.get("id", ""))
-        active = m.get("active", False)
-        closed = m.get("closed", False)
+        # 如果事件详情是直接获取的（已含markets），使用当前数据
+        # 如果是列表中的事件（可能不含markets），需要单独获取详情
+        if not markets and event_slug:
+            detail = api.get_event_by_slug(event_slug)
+            if detail:
+                markets = detail.get("markets", [])
+                evt = detail
 
-        # 跳过已关闭的市场
-        if closed:
-            continue
-        if not active:
-            continue
+        if not markets:
+            continue  # 跳过没有市场数据的事件
 
-        # 提取 YES token
-        tokens = m.get("tokens", [])
-        yes_id = ""
-        for t in tokens:
-            if t.get("outcome", "").upper() == "YES":
-                yes_id = t.get("token_id", "")
+        # 在事件的市场中找到 BTC UP 市场
+        # btc-updown 事件通常有2个市场: "Up" 和 "Down"
+        best_condition_id = ""
+        best_token_id = ""
 
-        # 记录第一个活跃市场作为最终备选
-        if not fallback:
-            fallback = (slug, condition_id, yes_id, question)
+        for mkt in markets:
+            question = mkt.get("question", mkt.get("title", "")).lower()
+            if not question:
+                continue
 
-        # 排除恶搞市场
-        if any(kw in question for kw in exclude_keywords):
-            logger.debug(f"排除非价格市场: {question[:50]}...")
-            continue
+            # 找 "up" / "上涨" 相关市场
+            if "up" in question or "上涨" in question or "rise" in question:
+                condition_id = mkt.get("conditionId", mkt.get("condition_id", ""))
+                # 获取 token: 可能是 clobTokenIds (JSON string) 或 tokens 数组
+                clob_ids = mkt.get("clobTokenIds", mkt.get("clob_token_ids", ""))
+                if isinstance(clob_ids, str) and clob_ids:
+                    try:
+                        clob_ids = json.loads(clob_ids)
+                    except:
+                        clob_ids = [clob_ids] if clob_ids.startswith("0x") else []
 
-        # 必须包含价格追踪关键词
-        if not any(kw in question for kw in price_keywords):
-            continue
+                tokens = mkt.get("tokens", [])
+                if not clob_ids and tokens:
+                    for t in tokens:
+                        outcome = t.get("outcome", "").upper()
+                        if outcome in ("YES", "UP"):
+                            best_token_id = t.get("token_id", t.get("tokenId", ""))
+                            break
+                elif clob_ids:
+                    # clobTokenIds[0] 是 YES/UP, [1] 是 NO/DOWN
+                    best_token_id = clob_ids[0] if isinstance(clob_ids, list) and len(clob_ids) > 0 else str(clob_ids)
 
-        # 算分：包含价格数值的市场得分更高
-        score = 0
-        if "$" in question or re.search(r'\d{3,}', question):
-            score += 2
-        if "above" in question or "over" in question:
-            score += 1
-        if "below" in question or "under" in question:
-            score += 1
-        if yes_id:
-            score += 1
+                best_condition_id = condition_id
 
-        if score > 0:
-            candidates.append((score, slug, condition_id, yes_id, question))
+                if best_condition_id and best_token_id:
+                    logger.info(f"找到 BTC updown 事件: {event_slug}")
+                    logger.info(f"  UP市场: {question}, condition_id={best_condition_id[:20]}...")
+                    logger.info(f"  UP token: {best_token_id[:20]}...")
+                    return event_slug, best_condition_id, best_token_id
 
-    # 按分数排序
-    if candidates:
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        score, slug, condition_id, yes_id, question = candidates[0]
-        logger.info(f"找到BTC价格市场(得分{score}): {question[:60]}...")
-        logger.info(f"  slug={slug}, condition_id={condition_id[:20]}..., yes_token={yes_id[:20]}...")
-        return slug, condition_id, yes_id
+        # 如果没有明确区分 up/down，取第一个市场
+        if markets and not best_condition_id:
+            mkt = markets[0]
+            condition_id = mkt.get("conditionId", mkt.get("condition_id", ""))
+            clob_ids = mkt.get("clobTokenIds", "")
+            if isinstance(clob_ids, str) and clob_ids:
+                try:
+                    clob_ids = json.loads(clob_ids)
+                    token_id = clob_ids[0] if isinstance(clob_ids, list) and clob_ids else ""
+                except:
+                    token_id = clob_ids if clob_ids.startswith("0x") else ""
 
-    if fallback:
-        logger.warning(f"未找到价格追踪市场，使用备选: {fallback[3][:60]}...")
-        return fallback[0], fallback[1], fallback[2]
+            logger.info(f"使用第一个市场: event={event_slug}, condition_id={condition_id[:20]}...")
+            return event_slug, condition_id, token_id
 
-    logger.warning("未找到任何活跃BTC市场")
+    logger.error("未找到合适的 BTC updown 市场")
     return "", "", ""
 
 
