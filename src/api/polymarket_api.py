@@ -89,6 +89,28 @@ class PolymarketAPI:
         self.gamma_url = BASE_URLS["gamma"]
         self.clob_url = BASE_URLS["clob"]
 
+    @staticmethod
+    def _normalize_token_id(raw_id) -> str:
+        """将 token_id 标准化为 0x 前缀的十六进制字符串
+        
+        CLOB API 要求 token_id 必须是 0x 开头的 hex 格式。
+        Gamma API 可能返回 decimal 字符串（如 '443058...'），需转换。
+        """
+        if not raw_id:
+            return ""
+        s = str(raw_id).strip()
+        if s.startswith("0x"):
+            return s
+        # 检查是否是纯数字（decimal 格式）
+        if s.isdigit():
+            return hex(int(s))
+        # 可能是 hex 但没有 0x 前缀
+        try:
+            int(s, 16)
+            return "0x" + s
+        except ValueError:
+            return s
+
     # ==================== 事件/市场搜索 ====================
 
     def search_btc_updown_events(self, limit: int = 10) -> list:
@@ -148,48 +170,65 @@ class PolymarketAPI:
         return _rate_limited_get(url)
 
     def get_market_by_id(self, condition_id: str) -> dict:
-        """通过 condition_id 获取市场详情"""
-        url = f"{self.gamma_url}/markets/{condition_id}"
-        return _rate_limited_get(url)
+        """通过 condition_id 获取市场详情（使用 query param）"""
+        url = f"{self.gamma_url}/markets"
+        return _rate_limited_get(url, params={"id": condition_id})
 
     def get_market_by_slug(self, slug: str) -> dict:
         """通过 slug 获取市场详情（使用 query param 方式）"""
         url = f"{self.gamma_url}/markets"
         return _rate_limited_get(url, params={"slug": slug})
 
-    def get_price_history(self, market_id: str, interval: str = "15m",
-                          limit: int = 200) -> list:
-        """获取市场价格历史（K线数据）
+    def get_current_price(self, token_id: str) -> float:
+        """获取当前中间价（CLOB API）
         
-        尝试多个 Gamma API 端点获取 timeseries 数据。
-        market_id 可以是 condition_id 或 slug。
+        token_id 会被自动标准化为 0x hex 格式。
+        返回 0~1 之间的价格。
         """
-        if not market_id:
-            logger.warning("market_id 为空，跳过价格数据获取")
-            return []
+        tid = self._normalize_token_id(token_id)
+        if not tid:
+            return 0.0
 
-        # 端点1: Gamma timeseries
-        for endpoint in [
-            f"{self.gamma_url}/markets/{market_id}/prices_history",
-            f"{self.gamma_url}/markets/{market_id}/timeseries",
-        ]:
-            data = _rate_limited_get(endpoint, params={"interval": interval, "limit": limit, "fidelity": 60})
-            if data:
-                result = self._normalize_price_data(data)
-                if result:
-                    logger.debug(f"从 {endpoint} 获取到 {len(result)} 条K线")
-                    return result
+        # CLOB /price 端点
+        url = f"{self.clob_url}/price"
+        data = _rate_limited_get(url, params={"token_id": tid})
+        if data:
+            bid = float(data.get("bid", 0))
+            ask = float(data.get("ask", 0))
+            mid = data.get("midpoint")
+            if mid is not None:
+                return float(mid)
+            if bid > 0 and ask > 0:
+                return (bid + ask) / 2
+            return bid or ask
 
-        # 端点2: 尝试从 market 详情获取 outcomePrices
-        detail = self.get_market_by_id(market_id)
-        if detail:
-            tokens = detail.get("tokens", detail.get("clobTokenIds", []))
-            prices_data = detail.get("outcomePrices", detail.get("prices", []))
-            if prices_data:
-                logger.debug(f"从市场详情获取到 {len(prices_data)} 条价格")
-                return self._normalize_price_data(prices_data)
+        # 备用: /midpoint
+        url2 = f"{self.clob_url}/midpoint"
+        data = _rate_limited_get(url2, params={"token_id": tid})
+        if data and data.get("midpoint") is not None:
+            return float(data["midpoint"])
 
-        logger.warning(f"无法获取K线数据: {market_id[:30]}...")
+        return 0.0
+
+    def get_price_history(self, token_id: str, interval: str = "15m",
+                          limit: int = 200) -> list:
+        """获取当前价格作为单个数据点（不再依赖不存在的 Gamma timeseries）
+        
+        由于 Gamma API 的 prices_history/timeseries 端点不存在，
+        此方法返回当前实时价格作为唯一定价点。
+        实际K线构建由调用方通过累积累 DB 数据完成。
+        """
+        price = self.get_current_price(token_id)
+        if price > 0:
+            now = int(time.time())
+            return [{
+                "timestamp": now,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 0,
+            }]
         return []
 
     def _normalize_price_data(self, raw_data) -> list:
@@ -218,33 +257,29 @@ class PolymarketAPI:
 
     def get_realtime_price(self, token_id: str) -> dict:
         """获取实时价格（买一/卖一/中间价）"""
-        if not token_id:
+        tid = self._normalize_token_id(token_id)
+        if not tid:
             return {"bid": 0, "ask": 0, "mid": 0, "token_id": ""}
 
-        # CLOB API price endpoint
         url = f"{self.clob_url}/price"
-        params = {"token_id": token_id}
-        data = _rate_limited_get(url, params=params)
+        data = _rate_limited_get(url, params={"token_id": tid})
         if data:
+            bid = float(data.get("bid", 0))
+            ask = float(data.get("ask", 0))
+            mid = data.get("midpoint")
+            if mid is None and bid > 0 and ask > 0:
+                mid = (bid + ask) / 2
             return {
-                "bid": float(data.get("bid", 0)),
-                "ask": float(data.get("ask", 0)),
-                "mid": float(data.get("midpoint", (float(data.get("bid", 0)) + float(data.get("ask", 0))) / 2)),
-                "token_id": token_id,
+                "bid": bid,
+                "ask": ask,
+                "mid": float(mid or 0),
+                "token_id": tid,
             }
-        return {"bid": 0, "ask": 0, "mid": 0, "token_id": token_id}
+        return {"bid": 0, "ask": 0, "mid": 0, "token_id": tid}
 
     def get_midpoint(self, token_id: str) -> float:
         """获取中间价"""
-        if not token_id:
-            return 0.0
-        url = f"{self.clob_url}/midpoint"
-        params = {"token_id": token_id}
-        data = _rate_limited_get(url, params=params)
-        if data and "midpoint" in data:
-            return float(data["midpoint"])
-        price = self.get_realtime_price(token_id)
-        return price.get("mid", 0)
+        return self.get_current_price(token_id)
 
     def get_token_ids(self, condition_id: str) -> dict:
         """获取市场的 YES/NO token ID"""

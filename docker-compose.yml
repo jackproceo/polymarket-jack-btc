@@ -10,6 +10,7 @@ services:
       - /opt/polymarket-jack-btc/data:/app/data
       - /opt/polymarket-jack-btc/logs:/app/logs
     environment:
+      - TZ=Asia/Shanghai
       # 从 .env 文件加载环境变量（需要先创建 .env 文件）
       - PROXY_URL=${PROXY_URL:-}
     # 如需使用 .env 文件，取消下面注释：

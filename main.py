@@ -165,62 +165,39 @@ def fetch_market_data(db, api, market_slug, condition_id=None, btc_token_id=None
     logger = get_logger()
 
     try:
-        # 设置 token_id：优先用传入的，其次用全局缓存的
         if btc_token_id:
             _btc_token_id = btc_token_id
         if condition_id:
             _market_condition_id = condition_id
 
-        # 如果还没有 token_id，尝试从市场详情获取
-        if not _btc_token_id and _market_condition_id:
-            market = api.get_market_by_id(_market_condition_id)
-            if market:
-                tokens = market.get("tokens", [])
-                for t in tokens:
-                    if t.get("outcome", "").upper() == "YES":
-                        _btc_token_id = t.get("token_id", "")
-
-        # 如果仍然没有，尝试通过 slug 获取
-        if not _btc_token_id and market_slug:
-            market = api.get_market_by_slug(market_slug)
-            if market:
-                # Gamma API 返回格式可能是列表或单个对象
-                if isinstance(market, list):
-                    market = market[0] if market else {}
-                tokens = market.get("tokens", [])
-                for t in tokens:
-                    if t.get("outcome", "").upper() == "YES":
-                        _btc_token_id = t.get("token_id", "")
-                if not _market_condition_id:
-                    _market_condition_id = market.get("condition_id", "")
-
-        token_id = _btc_token_id
-        if not token_id:
-            logger.warning("未找到 BTC YES token ID，跳过数据获取")
+        tid = _btc_token_id
+        if not tid:
+            logger.warning("未找到 BTC token ID，跳过数据获取")
             return
 
-        logger.debug(f"使用 token_id: {token_id[:20]}...")
+        # 获取当前价格（CLOB API，内部自动标准化 token_id）
+        price = api.get_current_price(tid)
+        if price <= 0:
+            logger.warning("获取价格失败")
+            return
 
-        # 获取K线历史数据（使用 condition_id 调用 Gamma API）
-        interval = config.BTC_MARKET.get("interval", "15m")
-        limit = config.BTC_MARKET.get("limit", 200)
-        history_id = _market_condition_id or token_id
-        kline_data = api.get_price_history(history_id, interval=interval, limit=limit)
+        _current_price = price
 
-        if kline_data:
-            inserted = db.insert_market_data(market_slug, kline_data)
-            if inserted > 0:
-                logger.info(f"新增 {inserted} 条K线数据")
-            _current_price = kline_data[-1].get("close", 0.0)
-            logger.debug(f"K线收盘价: {_current_price:.6f}")
+        # 将当前价格作为K线数据点存入数据库
+        now = int(time.time())
+        kline_data = [{
+            "timestamp": now,
+            "open": price,
+            "high": price,
+            "low": price,
+            "close": price,
+            "volume": 0,
+        }]
+        inserted = db.insert_market_data(market_slug, kline_data)
+        if inserted > 0:
+            logger.info(f"价格数据已记录: {price:.4f}")
         else:
-            logger.warning("未获取到K线数据")
-
-        # 获取实时中间价（CLOB API）
-        price_info = api.get_realtime_price(_btc_token_id)
-        if price_info.get("mid", 0) > 0:
-            _current_price = price_info["mid"]
-            logger.debug(f"实时中间价: {_current_price:.6f}")
+            logger.debug(f"价格: {price:.4f} (数据点已存在)")
 
     except Exception as e:
         logger.error(f"获取市场数据失败: {e}")
@@ -284,6 +261,9 @@ def main():
 
     api = PolymarketAPI()
     market_slug, condition_id, yes_token_id = find_btc_market(api)
+    # 标准化 token_id（clobTokenIds 可能返回 decimal，需转为 0x hex）
+    yes_token_id = api._normalize_token_id(yes_token_id)
+    condition_id = api._normalize_token_id(condition_id) if condition_id else ""
     _market_id = market_slug
     _market_condition_id = condition_id
     _btc_token_id = yes_token_id
