@@ -33,3 +33,9 @@ Thumbs.db
 
 # ==================== Docker ====================
 # (保留 Dockerfile 和 docker-compose.yml)
+
+
+
+*.md
+jack*.txt
+jack*.log

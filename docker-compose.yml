@@ -1,19 +1,17 @@
-version: "3.8"
-
 services:
   polymarket-bot:
     build: .
     container_name: polymarket-btc-bot
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "25008:5000"
     volumes:
       # 持久化数据库和日志（容器重启不丢失）
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - /opt/polymarket-jack-btc/data:/app/data
+      - /opt/polymarket-jack-btc/logs:/app/logs
     environment:
       # 从 .env 文件加载环境变量（需要先创建 .env 文件）
       - PROXY_URL=${PROXY_URL:-}
     # 如需使用 .env 文件，取消下面注释：
-    # env_file:
-    #   - .env
+    env_file:
+      - .env
