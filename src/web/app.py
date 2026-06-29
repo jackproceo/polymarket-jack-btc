@@ -16,6 +16,9 @@ _api = None
 _current_price = 0.0
 _market_id = ""
 _market_slug = ""  # 当前市场slug，用于前端链接
+_btc_price = 0.0
+_btc_direction = "UNKNOWN"
+_btc_change_pct = 0.0
 
 
 def create_app(db_manager, strategy_manager, simulator, polymarket_api,
@@ -47,6 +50,9 @@ def create_app(db_manager, strategy_manager, simulator, polymarket_api,
             "current_price": _get_current_price(),
             "market_id": _market_id,
             "market_slug": _market_slug,
+            "btc_price": _btc_price,
+            "btc_direction": _btc_direction,
+            "btc_change_pct": round(_btc_change_pct, 4),
             "timestamp": int(time.time()),
         })
 
@@ -197,13 +203,26 @@ def create_app(db_manager, strategy_manager, simulator, polymarket_api,
         bindings = _db.get_enabled_bindings()
         for b in bindings:
             if b["id"] == bind_id:
-                # 找到对应的策略实例，更新状态
                 from src.strategy.strategy_manager import StrategyManager
                 key = (b["account_id"], b["strategy_id"])
                 instances = _strategy_mgr._strategy_instances
                 if key in instances:
                     instances[key].set_enabled(bool(enabled))
                 break
+
+    # 对外暴露的更新函数（main.py 调用）
+    app.update_btc_info = lambda btc_price, direction, change_pct: _update_btc(btc_price, direction, change_pct)
+    app.update_price = lambda price: _update_price(price)
+
+    def _update_btc(btc_price: float, direction: str, change_pct: float):
+        global _btc_price, _btc_direction, _btc_change_pct
+        _btc_price = btc_price
+        _btc_direction = direction
+        _btc_change_pct = change_pct
+
+    def _update_price(price: float):
+        global _current_price
+        _current_price = price
 
     return app
 

@@ -54,19 +54,29 @@ class StrategyManager:
             instance.update_params(custom_params)
         return instance
 
-    def run_all_enabled(self, market_id: str) -> list:
-        """执行所有已启用的账户-策略绑定"""
+    def run_all_enabled(self, market_id: str, btc_market_id: str = "BTCUSDT") -> list:
+        """执行所有已启用的账户-策略绑定
+        
+        :param market_id: Polymarket 市场数据ID (slug)
+        :param btc_market_id: BTC真实价格数据ID（用于技术指标计算）
+        """
         bindings = self.db.get_enabled_bindings()
         if not bindings:
             logger.debug("没有已启用的策略绑定")
             return []
 
+        # 加载 Polymarket 价格数据
         kline_data = self.db.get_market_data(market_id, limit=100)
         if not kline_data:
             logger.warning("没有市场数据，跳过策略执行")
             return []
 
         df = pd.DataFrame(kline_data)
+
+        # 加载 BTC 真实价格数据（策略用此计算 MACD/MA）
+        btc_data = self.db.get_market_data(btc_market_id, limit=100)
+        btc_df = pd.DataFrame(btc_data) if btc_data else None
+
         results = []
 
         for binding in bindings:
@@ -81,7 +91,8 @@ class StrategyManager:
                 if not instance or not instance.is_enabled():
                     continue
 
-                signal = instance.generate_signal(df)
+                # 传入 BTC 真实价格数据
+                signal = instance.generate_signal(df, btc_df=btc_df)
                 instance.last_signal = signal["action"]
 
                 logger.info(

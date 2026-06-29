@@ -25,6 +25,7 @@ import config
 from src.utils.logger import setup_logger, get_logger
 from src.database.db_manager import DBManager
 from src.api.polymarket_api import PolymarketAPI
+from src.api.btc_price import BTCPriceTracker, get_btc_klines
 from src.strategy.strategy_manager import StrategyManager
 from src.strategy.strategy_loader import discover_strategies
 from src.trading.account import AccountManager
@@ -35,6 +36,9 @@ _running = True
 _current_price = 0.0
 _market_slug = ""
 _up_token_id = ""
+_down_token_id = ""
+_btc_tracker = BTCPriceTracker()
+_btc_price = 0.0
 
 
 def _signal_handler(sig, frame):
@@ -75,11 +79,22 @@ def find_btc_market(api):
     logger.info(f"  slug={info['slug']}")
     logger.info(f"  start={info['start_time']}  end={info['end_time']}")
     logger.info(f"  up_token_id={info['up_token_id'][:30]}...")
+
+    # 同步 BTC 价格追踪器到新窗口
+    try:
+        from src.api.polymarket_api import _parse_iso_time
+        start_dt = _parse_iso_time(info["start_time"])
+        if start_dt:
+            window_ts = int(start_dt.timestamp())
+            _btc_tracker.sync_with_window(window_ts)
+    except Exception:
+        pass
+
     return info
 
 
 def fetch_market_data(db, api, market_info):
-    global _current_price
+    global _current_price, _btc_price
     logger = get_logger()
 
     if not market_info:
@@ -89,35 +104,43 @@ def fetch_market_data(db, api, market_info):
         slug = market_info["slug"]
         up_id = market_info["up_token_id"]
 
-        # 从 CLOB /price 获取当前价格
+        # 从 CLOB /price 获取 Polymarket 价格
         price = api.get_current_price(up_id)
         if price <= 0:
             logger.warning(f"获取价格失败 (token={up_id[:30]}...)")
-            return
-
-        _current_price = price
-
-        # 存入数据库
-        now = int(time.time())
-        kline = [{
-            "timestamp": now,
-            "open": price,
-            "high": price,
-            "low": price,
-            "close": price,
-            "volume": 0,
-        }]
-        inserted = db.insert_market_data(slug, kline)
-        if inserted > 0:
-            logger.info(f"价格已记录: {price:.4f} (Up token)")
         else:
-            logger.debug(f"价格: {price:.4f}")
+            _current_price = price
+            now = int(time.time())
+            kline = [{"timestamp": now, "open": price, "high": price,
+                       "low": price, "close": price, "volume": 0}]
+            inserted = db.insert_market_data(slug, kline)
+            if inserted > 0:
+                logger.info(f"Polymarket Up价格: {price:.4f}")
+            else:
+                logger.debug(f"Up价格: {price:.4f}")
+
+        # 获取 BTC 真实价格并存入数据库（策略用）
+        _btc_tracker.update()
+        btc_price = _btc_tracker.current_price
+        if btc_price > 0:
+            _btc_price = btc_price
+            now = int(time.time())
+            btc_kline = [{"timestamp": now, "open": btc_price, "high": btc_price,
+                          "low": btc_price, "close": btc_price, "volume": 0}]
+            db.insert_market_data("BTCUSDT", btc_kline)
+
+            direction = _btc_tracker.direction
+            change = _btc_tracker.change_pct
+            logger.info(f"BTC真实价格: ${btc_price:.2f} | "
+                        f"窗口方向: {direction} ({change:+.3f}%) | "
+                        f"Up token: {_current_price:.4f}")
 
     except Exception as e:
         logger.error(f"获取市场数据失败: {e}")
 
 
 def run_strategies(db, strategy_mgr, simulator, market_slug):
+    global _btc_tracker
     logger = get_logger()
     try:
         signals = strategy_mgr.run_all_enabled(market_slug)
@@ -132,7 +155,7 @@ def run_strategies(db, strategy_mgr, simulator, market_slug):
 
 
 def scheduler_loop(db, api, strategy_mgr, simulator, market_info):
-    global _running, _market_slug, _up_token_id
+    global _running, _market_slug, _up_token_id, _down_token_id, _btc_tracker
     logger = get_logger()
     fetch_interval = config.BTC_MARKET.get("fetch_interval", 60)
     rediscover_interval = 300  # 每5分钟重新发现市场（应对窗口切换）
@@ -143,13 +166,14 @@ def scheduler_loop(db, api, strategy_mgr, simulator, market_info):
     while _running:
         now = time.time()
 
-        # 定期重新发现市场
+        # 定期重新发现市场 + 同步 BTC 窗口
         if now - last_discover >= rediscover_interval:
             new_info = find_btc_market(api)
             if new_info:
                 market_info = new_info
                 _market_slug = market_info["slug"]
                 _up_token_id = market_info["up_token_id"]
+                _down_token_id = market_info.get("down_token_id", "")
             last_discover = now
 
         if now - last_fetch >= fetch_interval:
@@ -194,6 +218,7 @@ def main():
 
     _market_slug = market_info["slug"]
     _up_token_id = market_info["up_token_id"]
+    _down_token_id = market_info.get("down_token_id", "")
 
     strategy_mgr = StrategyManager(db, api)
     strategy_mgr.sync_strategies_to_db()
@@ -223,6 +248,24 @@ def main():
         market_id=_market_slug,
         market_slug=_market_slug,
     )
+
+    # 启动 BTC 信息同步线程
+    def sync_btc_to_web():
+        global _running, _btc_tracker, _current_price
+        while _running:
+            try:
+                app.update_btc_info(
+                    _btc_tracker.current_price,
+                    _btc_tracker.direction,
+                    _btc_tracker.change_pct
+                )
+                app.update_price(_current_price)
+            except Exception:
+                pass
+            time.sleep(5)
+
+    btc_sync_thread = threading.Thread(target=sync_btc_to_web, daemon=True, name="BTCWebSync")
+    btc_sync_thread.start()
 
     logger.info(f"Web Dashboard 启动: http://{config.WEB['host']}:{config.WEB['port']}")
     app.run(

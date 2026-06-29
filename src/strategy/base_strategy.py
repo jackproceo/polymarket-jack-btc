@@ -30,15 +30,16 @@ class BaseStrategy(ABC):
         self.last_signal = "HOLD"
 
     @abstractmethod
-    def generate_signal(self, df: pd.DataFrame) -> dict:
+    def generate_signal(self, df: pd.DataFrame, btc_df: pd.DataFrame = None) -> dict:
         """
         核心方法：根据K线数据生成交易信号
-        :param df: K线DataFrame，包含 open/high/low/close/volume/timestamp 列
+        :param df: Polymarket K线DataFrame，包含 close/volume 等列
+        :param btc_df: BTC真实价格K线 (Binance) - 用于MACD/MA等技术指标计算
         :return: {
             "action": "BUY" | "SELL" | "HOLD",
-            "confidence": float,   # 信号强度 0~1
-            "reason": str,         # 信号原因（用于记录和展示）
-            "price": float,        # 当前价格
+            "confidence": float,
+            "reason": str,
+            "price": float,
         }
         """
         pass

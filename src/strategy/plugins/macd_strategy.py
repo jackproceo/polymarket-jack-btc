@@ -28,60 +28,67 @@ class MACDStrategy(BaseStrategy):
         "sell_on_crossunder": True, # 死叉时卖出
     }
 
-    def generate_signal(self, df: pd.DataFrame) -> dict:
+    def generate_signal(self, df: pd.DataFrame, btc_df: pd.DataFrame = None) -> dict:
         """
         生成MACD交易信号
+        优先使用 BTC 真实价格 (btc_df) 计算 MACD，回退到 Polymarket 价格 (df)
         """
-        if len(df) < self.params["slow_period"] + self.params["signal_period"]:
+        # 确定用于技术指标的价格数据源
+        need_len = self.params["slow_period"] + self.params["signal_period"]
+        price_source = btc_df if btc_df is not None and len(btc_df) >= need_len else df
+
+        if len(price_source) < need_len:
             return {"action": "HOLD", "confidence": 0.0, "reason": "数据不足", "price": 0.0}
 
-        df = self.preprocess_df(df)
-        close = df["close"]
+        price_source = self.preprocess_df(price_source)
+        source_close = price_source["close"]
 
-        # 计算MACD
+        # 计算MACD（基于 BTC 真实价格或 Polymarket 价格）
         macd_line, signal_line, histogram = self.calc_macd(
-            close,
+            source_close,
             fast=self.params["fast_period"],
             slow=self.params["slow_period"],
             signal=self.params["signal_period"],
         )
 
-        # 计算前一期值（用于判断交叉）
+        # 判断交叉
         macd_prev = macd_line.iloc[-2]
         signal_prev = signal_line.iloc[-2]
         macd_curr = macd_line.iloc[-1]
         signal_curr = signal_line.iloc[-1]
 
-        current_price = close.iloc[-1]
+        source_label = "BTC" if btc_df is not None and len(btc_df) > 0 else "Polymarket"
 
-        # 趋势过滤
+        # 趋势过滤（基于 source price）
         trend_ok = True
-        if self.params["trend_filter"] and len(close) >= self.params["trend_ma_period"]:
-            ma_trend = close.rolling(window=self.params["trend_ma_period"]).mean()
-            trend_ok = current_price > ma_trend.iloc[-1]
+        if self.params["trend_filter"] and len(source_close) >= self.params["trend_ma_period"]:
+            ma_trend = source_close.rolling(window=self.params["trend_ma_period"]).mean()
+            trend_ok = source_close.iloc[-1] > ma_trend.iloc[-1]
+
+        # 交易执行价用 Polymarket YES token 价格
+        exec_df = self.preprocess_df(df)
+        current_price = exec_df["close"].iloc[-1] if len(exec_df) > 0 else 0.0
 
         reason_parts = []
         action = "HOLD"
 
-        # 金叉：MACD上穿Signal
+        # 金叉 → 买入
         if self.params["buy_on_crossover"]:
             if macd_prev <= signal_prev and macd_curr > signal_curr:
                 if trend_ok:
                     action = "BUY"
-                    reason_parts.append("MACD金叉")
+                    reason_parts.append(f"[{source_label}] MACD金叉")
                 else:
                     reason_parts.append("MACD金叉但趋势过滤未通过")
 
-        # 死叉：MACD下穿Signal
+        # 死叉 → 卖出
         if self.params["sell_on_crossunder"] and action == "HOLD":
             if macd_prev >= signal_prev and macd_curr < signal_curr:
                 action = "SELL"
-                reason_parts.append("MACD死叉")
+                reason_parts.append(f"[{source_label}] MACD死叉")
 
-        # 计算信号强度（基于柱状图绝对值）
         hist_val = abs(histogram.iloc[-1])
-        confidence = min(hist_val * 10, 1.0)  # 简单归一化
-
+        confidence = min(hist_val * 10, 1.0)
         reason = ", ".join(reason_parts) if reason_parts else "无信号"
 
         return {
@@ -92,4 +99,5 @@ class MACDStrategy(BaseStrategy):
             "macd": round(macd_curr, 6),
             "signal_line": round(signal_curr, 6),
             "histogram": round(histogram.iloc[-1], 6),
+            "price_source": source_label,
         }

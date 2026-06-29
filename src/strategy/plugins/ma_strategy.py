@@ -26,23 +26,27 @@ class MAStrategy(BaseStrategy):
         "min_distance": 0.0,         # 均线最小距离（百分比），避免频繁交易
     }
 
-    def generate_signal(self, df: pd.DataFrame) -> dict:
+    def generate_signal(self, df: pd.DataFrame, btc_df: pd.DataFrame = None) -> dict:
         """
         生成MA交易信号
+        优先使用 BTC 真实价格 (btc_df) 计算均线，回退到 Polymarket 价格 (df)
         """
-        if len(df) < self.params["long_period"] + 2:
+        # 确定用于技术指标的价格数据源
+        price_source = btc_df if btc_df is not None and len(btc_df) >= self.params["long_period"] + 2 else df
+
+        if len(price_source) < self.params["long_period"] + 2:
             return {"action": "HOLD", "confidence": 0.0, "reason": "数据不足", "price": 0.0}
 
-        df = self.preprocess_df(df)
-        close = df["close"]
+        price_source = self.preprocess_df(price_source)
+        source_close = price_source["close"]
 
-        # 选择均线类型
+        # 选择均线类型（基于 BTC 真实价格或 Polymarket 价格）
         if self.params["ma_type"].upper() == "EMA":
-            ma_short = self.calc_ema(close, self.params["short_period"])
-            ma_long = self.calc_ema(close, self.params["long_period"])
+            ma_short = self.calc_ema(source_close, self.params["short_period"])
+            ma_long = self.calc_ema(source_close, self.params["long_period"])
         else:
-            ma_short = self.calc_sma(close, self.params["short_period"])
-            ma_long = self.calc_sma(close, self.params["long_period"])
+            ma_short = self.calc_sma(source_close, self.params["short_period"])
+            ma_long = self.calc_sma(source_close, self.params["long_period"])
 
         # 获取当前和前一期值
         lookback = max(1, self.params["signal_lookback"])
@@ -51,36 +55,37 @@ class MAStrategy(BaseStrategy):
         short_curr = ma_short.iloc[-1]
         long_curr = ma_long.iloc[-1]
 
-        current_price = close.iloc[-1]
+        # 交易执行价仍用 Polymarket YES token 价格
+        exec_df = self.preprocess_df(df)
+        current_price = exec_df["close"].iloc[-1] if len(exec_df) > 0 else 0.0
 
-        # 计算均线距离（用于过滤微弱信号）
+        # 计算均线距离
         distance_pct = abs(short_curr - long_curr) / long_curr * 100 if long_curr > 0 else 0
 
+        source_label = "BTC" if btc_df is not None and len(btc_df) > 0 else "Polymarket"
         reason_parts = []
         action = "HOLD"
 
-        # 金叉：短均线上穿长均线
+        # 金叉 → 买入
         if short_prev <= long_prev and short_curr > long_curr:
             if distance_pct >= self.params["min_distance"]:
                 action = "BUY"
-                reason_parts.append(f"{self.params['ma_type']}金叉")
+                reason_parts.append(f"[{source_label}] {self.params['ma_type']}金叉")
             else:
                 reason_parts.append(f"金叉但距离过小({distance_pct:.2f}%)")
 
-        # 死叉：短均线下穿长均线
+        # 死叉 → 卖出
         elif short_prev >= long_prev and short_curr < long_curr:
             action = "SELL"
-            reason_parts.append(f"{self.params['ma_type']}死叉")
+            reason_parts.append(f"[{source_label}] {self.params['ma_type']}死叉")
 
-        # 持仓中：均线多头排列提示继续持仓
+        # 均线位置
         elif short_curr > long_curr:
-            reason_parts.append("多头排列")
+            reason_parts.append(f"[{source_label}] 多头排列")
         elif short_curr < long_curr:
-            reason_parts.append("空头排列")
+            reason_parts.append(f"[{source_label}] 空头排列")
 
-        # 信号强度（基于均线距离）
         confidence = min(distance_pct / 5.0, 1.0)
-
         reason = ", ".join(reason_parts) if reason_parts else "无信号"
 
         return {
@@ -91,4 +96,5 @@ class MAStrategy(BaseStrategy):
             "ma_short": round(short_curr, 6),
             "ma_long": round(long_curr, 6),
             "distance_pct": round(distance_pct, 4),
+            "price_source": source_label,
         }
