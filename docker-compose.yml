@@ -1,7 +1,7 @@
 services:
-  polymarket-bot:
+  polymarket-jack-btc-bot:
     build: .
-    container_name: polymarket-btc-bot
+    container_name: polymarket-jack-btc-bot
     restart: unless-stopped
     ports:
       - "25008:5000"
