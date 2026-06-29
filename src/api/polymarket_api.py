@@ -262,47 +262,58 @@ class PolymarketAPI:
             "end_time": market.get("end_time", market.get("endTime", "")),
         }
 
+    @staticmethod
+    def _to_clob_token_id(raw_id) -> str:
+        """将 Gamma API 返回的 decimal token_id 转为 CLOB 要求的 0x hex 格式"""
+        if not raw_id:
+            return ""
+        s = str(raw_id).strip()
+        if s.startswith("0x"):
+            return s
+        # decimal 数字 → 0x hex
+        if s.isdigit():
+            return hex(int(s))
+        # 可能是无前缀的 hex
+        if all(c in "0123456789abcdefABCDEF" for c in s):
+            return "0x" + s
+        return s
+
     # ==================== CLOB 价格 ====================
 
     def get_current_price(self, token_id: str) -> float:
-        """获取 token 当前中间价（CLOB /price）
-        
-        token_id: decimal 字符串 (如 "81564136371631...")，不是 0x hex。
-        返回 0~1 之间的价格，失败返回 0。
-        """
-        if not token_id:
+        """获取 token 当前中间价（CLOB /price）"""
+        tid = self._to_clob_token_id(token_id)
+        if not tid:
             return 0.0
 
-        # CLOB /price 查询
         url = f"{self.clob_url}/price"
-        data = _rate_limited_get(url, params={"token_id": token_id})
+        data = _rate_limited_get(url, params={"token_id": tid})
         if data:
             price = data.get("price")
             if price is not None:
                 return float(price)
-            # 部分返回格式包含 bid/ask
             bid = float(data.get("bid", 0))
             ask = float(data.get("ask", 0))
             if bid > 0 and ask > 0:
                 return (bid + ask) / 2
             return bid or ask
-
         return 0.0
 
     def get_realtime_price(self, token_id: str) -> dict:
-        """获取实时价格详情"""
-        if not token_id:
+        """获取实时价格详情（bid/ask/mid）"""
+        tid = self._to_clob_token_id(token_id)
+        if not tid:
             return {"bid": 0, "ask": 0, "mid": 0, "token_id": ""}
 
         url = f"{self.clob_url}/price"
-        data = _rate_limited_get(url, params={"token_id": token_id})
+        data = _rate_limited_get(url, params={"token_id": tid})
         if data:
             bid = float(data.get("bid", 0))
             ask = float(data.get("ask", 0))
             price = data.get("price")
             mid = float(price) if price else ((bid + ask) / 2 if bid and ask else 0)
-            return {"bid": bid, "ask": ask, "mid": mid, "token_id": token_id}
-        return {"bid": 0, "ask": 0, "mid": 0, "token_id": token_id}
+            return {"bid": bid, "ask": ask, "mid": mid, "token_id": tid}
+        return {"bid": 0, "ask": 0, "mid": 0, "token_id": tid}
 
     def get_midpoint(self, token_id: str) -> float:
         """获取中间价"""

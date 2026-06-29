@@ -105,20 +105,32 @@ def fetch_market_data(db, api, market_info):
         slug = market_info["slug"]
         up_id = market_info["up_token_id"]
 
-        # 从 CLOB /price 获取 Polymarket 价格
-        price = api.get_current_price(up_id)
-        if price <= 0:
-            logger.warning(f"获取价格失败 (token={up_id[:30]}...)")
-        else:
-            _current_price = price
+        # 从 CLOB /price 获取 Polymarket 价格（含 bid/ask）
+        pm_price_data = api.get_realtime_price(up_id)
+        mid_price = pm_price_data.get("mid", 0)
+        bid = pm_price_data.get("bid", 0)
+        ask = pm_price_data.get("ask", 0)
+
+        if mid_price <= 0:
+            # fallback: 只用 get_current_price
+            mid_price = api.get_current_price(up_id)
+
+        if mid_price > 0:
+            _current_price = mid_price
             now = int(time.time())
-            kline = [{"timestamp": now, "open": price, "high": price,
-                       "low": price, "close": price, "volume": 0}]
-            inserted = db.insert_market_data(slug, kline)
-            if inserted > 0:
-                logger.info(f"Polymarket Up价格: {price:.4f}")
-            else:
-                logger.debug(f"Up价格: {price:.4f}")
+            kline = [{"timestamp": now, "open": mid_price, "high": mid_price,
+                       "low": mid_price, "close": mid_price, "volume": 0}]
+            db.insert_market_data(slug, kline)
+            logger.info(f"Polymarket Up: {mid_price:.4f} (bid={bid:.4f} ask={ask:.4f})")
+        else:
+            logger.warning(f"获取Polymarket价格失败 (token={up_id[:30]}...)")
+
+
+        try:
+            # 同步到 Web
+            app = __import__('sys').modules.get('flask', None)
+        except Exception:
+            pass
 
         # 获取 BTC 真实价格并存入数据库（策略用）
         _btc_tracker.update()
@@ -251,23 +263,30 @@ def main():
         market_slug=_event_slug,  # 前端展示用事件URL
     )
 
-    # 启动 BTC 信息同步线程
-    def sync_btc_to_web():
+    # Web 数据同步线程
+    def sync_data_to_web():
         global _running, _btc_tracker, _current_price
+        _bid = 0.0
+        _ask = 0.0
         while _running:
             try:
+                # 获取实时的 bid/ask
+                if _up_token_id:
+                    pm_data = api.get_realtime_price(_up_token_id)
+                    _bid = pm_data.get("bid", 0)
+                    _ask = pm_data.get("ask", 0)
+                app.update_pm_price(_current_price, _bid, _ask)
                 app.update_btc_info(
                     _btc_tracker.current_price,
                     _btc_tracker.direction,
                     _btc_tracker.change_pct
                 )
-                app.update_price(_current_price)
             except Exception:
                 pass
             time.sleep(5)
 
-    btc_sync_thread = threading.Thread(target=sync_btc_to_web, daemon=True, name="BTCWebSync")
-    btc_sync_thread.start()
+    sync_thread = threading.Thread(target=sync_data_to_web, daemon=True, name="WebSync")
+    sync_thread.start()
 
     logger.info(f"Web Dashboard 启动: http://{config.WEB['host']}:{config.WEB['port']}")
     app.run(

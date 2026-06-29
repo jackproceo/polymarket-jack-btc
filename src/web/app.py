@@ -19,6 +19,8 @@ _market_slug = ""  # 当前市场slug，用于前端链接
 _btc_price = 0.0
 _btc_direction = "UNKNOWN"
 _btc_change_pct = 0.0
+_pm_bid = 0.0
+_pm_ask = 0.0
 
 
 def create_app(db_manager, strategy_manager, simulator, polymarket_api,
@@ -48,6 +50,8 @@ def create_app(db_manager, strategy_manager, simulator, polymarket_api,
         return jsonify({
             "status": "running",
             "current_price": _get_current_price(),
+            "pm_bid": round(_pm_bid, 4),
+            "pm_ask": round(_pm_ask, 4),
             "market_id": _market_id,
             "market_slug": _market_slug,
             "btc_price": _btc_price,
@@ -212,7 +216,7 @@ def create_app(db_manager, strategy_manager, simulator, polymarket_api,
 
     # 对外暴露的更新函数（main.py 调用）
     app.update_btc_info = lambda btc_price, direction, change_pct: _update_btc(btc_price, direction, change_pct)
-    app.update_price = lambda price: _update_price(price)
+    app.update_pm_price = lambda price, bid, ask: _update_pm_price(price, bid, ask)
 
     def _update_btc(btc_price: float, direction: str, change_pct: float):
         global _btc_price, _btc_direction, _btc_change_pct
@@ -220,9 +224,11 @@ def create_app(db_manager, strategy_manager, simulator, polymarket_api,
         _btc_direction = direction
         _btc_change_pct = change_pct
 
-    def _update_price(price: float):
-        global _current_price
+    def _update_pm_price(price: float, bid: float, ask: float):
+        global _current_price, _pm_bid, _pm_ask
         _current_price = price
+        _pm_bid = bid
+        _pm_ask = ask
 
     return app
 

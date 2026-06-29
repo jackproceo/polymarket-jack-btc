@@ -434,9 +434,19 @@
             <span style="font-size:12px; color:var(--text-secondary);" id="statusText">运行中</span>
         </span>
     </div>
+    <!-- BTC预测价格 -->
     <div style="text-align:center;">
-        <div style="font-size:11px; color:var(--text-secondary);">BTC 预测价格</div>
+        <div style="font-size:11px; color:var(--text-secondary);">BTC Up 预测</div>
         <div class="topbar-price" id="topPrice">--</div>
+    </div>
+    <!-- Polymarket 买卖赔率 -->
+    <div style="text-align:center;">
+        <div style="font-size:11px; color:var(--text-secondary);">Polymarket 赔率</div>
+        <div style="display:flex; gap:10px; align-items:center;">
+            <span style="font-size:13px; color:var(--red); font-weight:600;" id="pmBid">买 --</span>
+            <span style="color:var(--text-secondary);">/</span>
+            <span style="font-size:13px; color:var(--green); font-weight:600;" id="pmAsk">卖 --</span>
+        </div>
     </div>
     <div style="display:flex; gap:16px; align-items:center; font-size:12px; color:var(--text-secondary);">
         <span>
@@ -1013,6 +1023,14 @@ async function loadStatus() {
     const data = await resp.json();
     document.getElementById('lastUpdate').textContent =
         '最近更新: ' + new Date(data.timestamp * 1000).toLocaleTimeString('zh-CN', {hour12:false});
+
+    // 更新 Polymarket 赔率
+    if (data.pm_bid >= 0) {
+        document.getElementById('pmBid').textContent = '买 ' + (data.pm_bid * 100).toFixed(1) + '%';
+    }
+    if (data.pm_ask >= 0) {
+        document.getElementById('pmAsk').textContent = (data.pm_ask * 100).toFixed(1) + '% 卖';
+    }
 
     // 更新市场链接
     if (data.market_slug && data.market_slug !== marketSlug) {
